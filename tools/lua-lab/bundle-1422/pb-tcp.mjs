@@ -255,6 +255,9 @@ export class AsyncClient {
 
 
 export function attachPipes(p, client) {
+  // bulk-чтение: kernel-модуль предпочитает p.readBytes(addr,len) в crossPipes (1 round-trip)
+  p.readBytes = async function (addr, len) { return client.read(addr, len); };
+  p.writeBytes = async function (addr, bytes) { return client.write(addr, bytes); };
   p.pipeRead = async function (addr, len, out) {
     const bytes = await client.read(addr, len);
     p.flush();

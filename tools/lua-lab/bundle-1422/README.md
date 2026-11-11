@@ -124,8 +124,12 @@ dry-run-моках) слушает TCP; `run-relapse-over-tcp.mjs` импорт�
 ИТОГ: done=true, стадий=13, OK=13, DEGRADED=0, FAIL=0
 ```
 
-Все 13 стадий зелёные — как `--dry-run-full` у владельца kernel-модуля. Что для этого понадобилось:
-префетч-кэш чтения (сканеры цепочки читают байты по одному; без кэша стадия 5 упиралась в бюджет),
-`p.pipeRead/p.pipeWrite` для cross-pipes (стадия 8) и `options.triggerPayload` с
-`t1_aio_wait_race.elf` для AIO sanity check (стадия 13). Payload 394 568 Б и триггер 10 000 Б
-простеганы через TCP (write1-батчинг по 32 KiB).
+Все 13 стадий зелёные — как `--dry-run-full` у владельца kernel-модуля; прогон ~3.3 с.
+
+Что понадобилось: `p.readBytes/p.writeBytes` (bulk, 1 round-trip на чанк — из них crossPipes
+берёт быстрый путь, стадия 8), `p.pipeRead/p.pipeWrite` (фолбэк), `options.triggerPayload` с
+`t1_aio_wait_race.elf` для AIO sanity check (стадия 13) и префетч-кэш чтения.
+Отдельно: владелец kernel-модуля (recon-fw-exists) по моему замеру 4604 мс/чанк исправил
+`kreadBytes()` (теперь возвращает `Uint8Array` напрямую, 1 round-trip вместо 2×len) и перевёл
+сканеры на чанки 0x10000 с перекрытием 8 байт — это зафиксировано в `recon/relapse-port-1422.md` §15.
+Payload 394 568 Б и триггер 10 000 Б простеганы через TCP (write1-батчинг по 32 KiB).

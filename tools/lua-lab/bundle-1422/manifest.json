@@ -22,7 +22,7 @@
     "sender_selftest": "PASS (8-byte LE framing)",
     "agent_lua_lua51_compile": "PASS",
     "run_sh": "7/7 PASS",
-    "fullchain_over_tcp": "PASS: 13 stages, done=true, OK=13, DEGRADED=0, FAIL=0 (log: output/fullchain-over-tcp.log)"
+    "fullchain_over_tcp": "PASS: 13 stages, done=true, OK=13, DEGRADED=0, FAIL=0, ~3.3 s (log: output/fullchain-over-tcp.log)"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -78,8 +78,8 @@
       "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
     },
     "README.md": {
-      "bytes": 9023,
-      "sha256": "bef471f08d7b9ad3cca97acb42a5948f9fe318f6f8b11841105ecd253345ac8a"
+      "bytes": 9430,
+      "sha256": "e8d5ad54ecf8cf35163f81453c192eaad11c02f652e9a0148cdec646b27f506a"
     },
     "demo-fullchain.py": {
       "bytes": 3726,
@@ -90,8 +90,8 @@
       "sha256": "b9e5df26638c8dccbfb389fb737bb56bac7d6037740fb04c45944cbae4d47a83"
     },
     "pb-tcp.mjs": {
-      "bytes": 11505,
-      "sha256": "9fc2a80ee8044b3e5f603bfcfcd512ab86eeb3494234f58ca0f8c8052327c603"
+      "bytes": 11789,
+      "sha256": "e7c60583e05e67632dea719850f2b21059dd542e9ebeb52f904ff32b35c9abc9"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -106,6 +106,7 @@
     "write_batching": "последовательные write1 батчатся по 32 KiB (staging ELF 394568 Б)",
     "stage8_pipes": "p.pipeRead/p.pipeWrite (attachPipes) — cross-pipes OK",
     "stage13_trigger": "options.triggerPayload = t1_aio_wait_race.elf (10000 B)",
-    "read_cache": "prefetch 4 KiB + invalidate on write (byte scanners speed-up)"
+    "read_cache": "prefetch 4 KiB + invalidate on write (byte scanners speed-up)",
+    "bulk_read": "p.readBytes/p.writeBytes — 1 round-trip per chunk (crossPipes fast path)"
   }
 }

