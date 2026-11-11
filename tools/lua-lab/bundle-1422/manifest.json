@@ -22,7 +22,7 @@
     "sender_selftest": "PASS (8-byte LE framing)",
     "agent_lua_lua51_compile": "PASS",
     "run_sh": "7/7 PASS",
-    "fullchain_over_tcp": "PASS: 13 stages, done=true, OK=13, DEGRADED=0, FAIL=0, ~3.3 s (log: output/fullchain-over-tcp.log)"
+    "fullchain_over_tcp": "PASS: 13 stages, done=true, OK=13, DEGRADED=0, FAIL=0 (~2.1 s; log: output/fullchain-over-tcp.log)"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -38,12 +38,12 @@
   ],
   "files": {
     "primitive.py": {
-      "bytes": 12987,
-      "sha256": "b8b617db5640c663c6ba32613cc4ef79f6de831186ad08844eb05994af869560"
+      "bytes": 13550,
+      "sha256": "384bc07f4f687c9f8a06f9a99c6b2d0a8083335adbbee366dcf1cfee65a221ff"
     },
     "kernel-runner.py": {
-      "bytes": 20963,
-      "sha256": "e22f4d8a12146308dca42e4278b8f36f34a647d1cec04053c84fb6e8c63fa2a5"
+      "bytes": 22104,
+      "sha256": "11280137b2e65164d8949dabca9a6f60767e7ebf1dc970cb9ac4a08d2f84ab36"
     },
     "yarpe_agent.py": {
       "bytes": 5675,
@@ -78,20 +78,20 @@
       "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
     },
     "README.md": {
-      "bytes": 9430,
-      "sha256": "e8d5ad54ecf8cf35163f81453c192eaad11c02f652e9a0148cdec646b27f506a"
+      "bytes": 11557,
+      "sha256": "354b482c99b94a55a840ea497a49f2b64f516a5395f8fe7ccd3feb6ced59a737"
     },
     "demo-fullchain.py": {
-      "bytes": 3726,
-      "sha256": "d2e6936e49bbb50eec349bf8674de25b07b58d06f4cae07a43705e3f74203a66"
+      "bytes": 4863,
+      "sha256": "10eeb4f021d2741ffab898f66fead0c51a0819a7b2794944c982fc0995540673"
     },
     "run-relapse-over-tcp.mjs": {
       "bytes": 4764,
       "sha256": "b9e5df26638c8dccbfb389fb737bb56bac7d6037740fb04c45944cbae4d47a83"
     },
     "pb-tcp.mjs": {
-      "bytes": 11789,
-      "sha256": "e7c60583e05e67632dea719850f2b21059dd542e9ebeb52f904ff32b35c9abc9"
+      "bytes": 14795,
+      "sha256": "f80e7b1117c4a6568e4bb258cb8d6e349fb709844a3535d214519e3ae0f79dfc"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -107,6 +107,10 @@
     "stage8_pipes": "p.pipeRead/p.pipeWrite (attachPipes) — cross-pipes OK",
     "stage13_trigger": "options.triggerPayload = t1_aio_wait_race.elf (10000 B)",
     "read_cache": "prefetch 4 KiB + invalidate on write (byte scanners speed-up)",
-    "bulk_read": "p.readBytes/p.writeBytes — 1 round-trip per chunk (crossPipes fast path)"
+    "bulk_read": "p.readBytes/p.writeBytes — 1 round-trip per chunk (crossPipes fast path)",
+    "rtmsg2_contract": "Uint8Array(512) + .ptr/.bytes; pure {ptr,bytes} requires kernel routingSocketReply fix: copyIntoProcess(reply.bytes ?? reply)",
+    "memory_spaces": "process: p.readBytes/read1-8/write1-8; kernel: rw.*, p.pipeReadBytes/p.pipeRead/pipeWrite (proto 0x08/0x09)",
+    "regression_guard": "demo-fullchain.py exit!=0 if stages<13/OK<13/DEGRADED/FAIL",
+    "debug": "PB_DEBUG=1 prints rtmsg2 type/len/first8/ret@184"
   }
 }

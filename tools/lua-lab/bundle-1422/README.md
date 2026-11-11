@@ -133,3 +133,30 @@ dry-run-моках) слушает TCP; `run-relapse-over-tcp.mjs` импорт�
 `kreadBytes()` (теперь возвращает `Uint8Array` напрямую, 1 round-trip вместо 2×len) и перевёл
 сканеры на чанки 0x10000 с перекрытием 8 байт — это зафиксировано в `recon/relapse-port-1422.md` §15.
 Payload 394 568 Б и триггер 10 000 Б простеганы через TCP (write1-батчинг по 32 KiB).
+
+### Контракт `chain.rtmsg2()` и разделение пространств памяти
+
+Kernel-модуль вызывает `chain.rtmsg2()` и делает `copyIntoProcess(reply)` — то есть обязан получить
+**байты**, а не объект. Мост отдаёт:
+
+```js
+chain.rtmsg2() -> Uint8Array(512)  // первые 8: 04 00 00 00 00 00 00 00
+                       .ptr        // 0x... — адрес этого же буфера в памяти ПРОЦЕССА
+                       .bytes      // он же (для кода, который ждёт {ptr, bytes})
+```
+
+Гибрид (Uint8Array + поля `.ptr`/`.bytes`) нужен потому, что `copyIntoProcess()` вызывает
+`new Uint8Array(obj)` для не-Uint8Array — от чистого `{ptr, bytes}` получается **0 байт**, и kernel
+падает на «в ответе нет author-record» (это и был симптом регрессии). Если kernel перейдёт на
+чистый объект, правка в его `routingSocketReply()` одна строка:
+`const b = reply && reply.bytes ? reply.bytes : reply; return this.copyIntoProcess(b);`
+
+**Два пространства памяти (проверено на TCP):**
+- `p.readBytes/writeBytes`, `p.read1/4/8`, `p.write1/4/8` — **память ПРОЦЕССА**;
+- `rw.read/write` (attachKernelRw), `p.pipeReadBytes`, `p.pipeRead/pipeWrite` — **память ЯДРА**
+  (отдельные команды протокола 0x08/0x09). Если kernel читает ядро через `p.readBytes`, мок
+  отдаёт нули — это намеренно, чтобы ловить такую ошибку до консоли (stage 8 self-check).
+
+Отладка: `PB_DEBUG=1 python3 demo-fullchain.py` печатает тип/длину/первые 8 байт/`ret@184` буфера
+`rtmsg2`. Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть
+DEGRADED/FAIL или `done != true` (переопределяется `EXPECTED_STAGES`).

@@ -29,6 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OUT_DIR = HERE / "output"
 LOG = OUT_DIR / "fullchain-over-tcp.log"
+EXPECTED_STAGES = int(__import__("os").environ.get("EXPECTED_STAGES", "13"))  # регрессия: меньше — exit != 0
 
 
 def start_runner(verbose: bool) -> tuple[subprocess.Popen, int]:
@@ -74,11 +75,31 @@ def main() -> int:
         )
         print(output)
         m = re.search(r"ИТОГ: done=(\w+), стадий=(\d+), OK=(\d+), DEGRADED=(\d+), FAIL=(\d+)", output)
-        if m:
-            print(f"\n[summary] full-chain через YARPE-примитив: стадий={m.group(2)}, OK={m.group(3)}, "
-                  f"DEGRADED={m.group(4)}, FAIL={m.group(5)}")
+        if not m:
+            print("[REGRESSION] в выводе нет строки ИТОГ — цепочка не дошла до отчёта")
+            print(f"[log] {LOG}")
+            return 1
+        done, stages, ok, degraded, failed = m.group(1), *map(int, m.groups()[1:])
+        print(f"\n[summary] full-chain через YARPE-примитив: стадий={stages}, OK={ok}, "
+              f"DEGRADED={degraded}, FAIL={failed}")
         print(f"[log] {LOG}")
-        return 0 if (proc.returncode == 0 and m and m.group(1) == "true") else 1
+        # строгая регрессия: полный набор стадий и все зелёные
+        regressions = []
+        if done != "true":
+            regressions.append("done != true")
+        if stages < EXPECTED_STAGES:
+            regressions.append(f"стадий {stages} < {EXPECTED_STAGES}")
+        if ok < EXPECTED_STAGES:
+            regressions.append(f"OK {ok} < {EXPECTED_STAGES}")
+        if degraded:
+            regressions.append(f"DEGRADED={degraded}")
+        if failed:
+            regressions.append(f"FAIL={failed}")
+        if regressions or proc.returncode != 0:
+            print("[REGRESSION] " + "; ".join(regressions or [f"node exit={proc.returncode}"]))
+            return 1
+        print("[OK] full-chain зелёный: все стадии OK, деградаций нет")
+        return 0
     finally:
         runner.terminate()
         try:

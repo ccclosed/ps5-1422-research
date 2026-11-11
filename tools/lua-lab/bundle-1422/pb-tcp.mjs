@@ -15,7 +15,9 @@
 import net from 'node:net';
 import { Worker } from 'node:worker_threads';
 
-const CMD = { READ: 1, WRITE: 2, MALLOC: 3, SYSCALL: 4, READY: 5, REASON: 6, PING: 7 };
+const CMD = { READ: 1, WRITE: 2, MALLOC: 3, SYSCALL: 4, READY: 5, REASON: 6, PING: 7,
+              // память ЯДРА отдельным пространством (см. jb1422 §15.4)
+              READK: 8, WRITEK: 9 };
 const SAB_SIZE = 1024 + (1 << 16);
 const DATA_OFF = 1024;
 const MAX_DATA = 1 << 16;
@@ -125,6 +127,7 @@ export function openSyncPrimitive(host, port, timeoutMs = 30000) {
 
   const p = {
     flush() { flushPending(); },
+    invalidate() { rcache = null; },
     ready() { return true; },
     reason() { return 'tcp'; },
     read1(addr) { const { buf, off } = readCached(toBigInt(addr)); return buf[off]; },
@@ -237,6 +240,21 @@ export class AsyncClient {
 
   async syscall(num, ...args) { return this.callSyscall(num, args); }
 
+  async readKernel(addr, len) {
+    const parts = [Buffer.from([CMD.READK])];
+    const ab = Buffer.alloc(8); ab.writeBigUInt64LE(toBigInt(addr)); parts.push(ab);
+    const lb = Buffer.alloc(8); lb.writeBigUInt64LE(BigInt(len)); parts.push(lb);
+    return Uint8Array.from(await this.roundTrip(Buffer.concat(parts), len));
+  }
+
+  async writeKernel(addr, bytes) {
+    const parts = [Buffer.from([CMD.WRITEK])];
+    const ab = Buffer.alloc(8); ab.writeBigUInt64LE(toBigInt(addr)); parts.push(ab);
+    const lb = Buffer.alloc(8); lb.writeBigUInt64LE(BigInt(bytes.length)); parts.push(lb);
+    parts.push(Buffer.from(bytes));
+    await this.roundTrip(Buffer.concat(parts), 0);
+  }
+
   async read(addr, len) {
     const parts = [Buffer.from([CMD.READ])];
     const ab = Buffer.alloc(8); ab.writeBigUInt64LE(toBigInt(addr)); parts.push(ab);
@@ -256,10 +274,13 @@ export class AsyncClient {
 
 export function attachPipes(p, client) {
   // bulk-чтение: kernel-модуль предпочитает p.readBytes(addr,len) в crossPipes (1 round-trip)
-  p.readBytes = async function (addr, len) { return client.read(addr, len); };
-  p.writeBytes = async function (addr, bytes) { return client.write(addr, bytes); };
+  p.readBytes = async function (addr, len) { p.flush(); return client.read(addr, len); };
+  p.writeBytes = async function (addr, bytes) { const r = await client.write(addr, bytes); p.invalidate(); return r; };
+  // pipeReadBytes: bulk-чтение ЯДРА через pipe (p.readBytes — это ПРОЦЕСС, не путать)
+  p.pipeReadBytes = async function (addr, len) { p.flush(); return client.readKernel(addr, len); };
   p.pipeRead = async function (addr, len, out) {
-    const bytes = await client.read(addr, len);
+    p.flush();
+    const bytes = await client.readKernel(addr, len);
     p.flush();
     for (let i = 0; i < len; i++) p.write1(out.add32(i), bytes[i]);
     p.flush();
@@ -269,7 +290,8 @@ export function attachPipes(p, client) {
     const v = toBigInt(val);
     const bytes = new Uint8Array(len);
     for (let i = 0; i < len; i++) bytes[i] = Number((v >> BigInt(8 * i)) & 0xFFn);
-    await client.write(addr, bytes);
+    await client.writeKernel(addr, bytes);
+    p.invalidate();
     return len;
   };
   return p;
@@ -288,8 +310,40 @@ export function makeChain(asyncClient, syncPrimitive) {
       const ret = 0x00B06869;
       for (let i = 0; i < 4; i++) payload[184 + i] = (ret >>> (i * 8)) & 0xFF;
       for (let i = 0; i < 4; i++) payload[188 + i] = 0xFF;
+      // Возвращаем ПРОСТОЙ Uint8Array: kernel-модуль в routingSocketReply() делает
+      // copyIntoProcess(bytes) (p.write1 в память процесса) и затем читает ответ
+      // обратно через p.readBytes — именно этот путь и надо проверить на TCP.
+      // Объект вида {ptr, bytes} kernel-модуль не принимает (new Uint8Array(obj) => пусто).
       syncPrimitive.write(bufAddr, payload);
-      return syncPrimitive.read(bufAddr, 512);
+      if (syncPrimitive.flush) syncPrimitive.flush();
+      // Контракт моста (важно, зафиксировано в README):
+      //   chain.rtmsg2() -> Uint8Array(512) с дополнительными полями:
+      //       .ptr   — адрес этого же буфера в памяти ПРОЦЕССА (как на консоли);
+      //       .bytes — он же (для kernel-кода, который ждёт {ptr, bytes}).
+      // Гибрид нужен потому, что kernel.copyIntoProcess() принимает Uint8Array
+      // напрямую (`new Uint8Array(obj)` от чистого объекта даёт 0 байт).
+      // Контракт моста (зафиксировано с kernel-владельцем): по умолчанию —
+      // ОБЪЕКТ { ptr, bytes }, где bytes — Uint8Array(512). PB_RTMSG2=hybrid
+      // возвращает Uint8Array с полями .ptr/.bytes (совместимость со старым kernel,
+      // который звал new Uint8Array(obj) и получал 0 байт).
+      const mode = process.env.PB_RTMSG2 || 'object';
+      let reply;
+      if (mode === 'hybrid') {
+        payload.ptr = bufAddr;
+        payload.bytes = payload;
+        reply = payload;
+      } else {
+        reply = { ptr: bufAddr, bytes: payload };
+      }
+      if (process.env.PB_DEBUG) {
+        const head = Array.from(payload.slice(0, 8)).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(' ');
+        const ret184 = Array.from(payload.slice(184, 192)).map(function (x) { return x.toString(16).padStart(2, '0'); }).join(' ');
+        console.error('[rtmsg2] mode=' + mode + ' type=' + reply.constructor.name +
+                      ' bytesType=' + payload.constructor.name + ' len=' + payload.length +
+                      ' first8=' + head + ' ret@184=' + ret184 +
+                      ' ptr=0x' + Number(bufAddr.low).toString(16));
+      }
+      return reply;
     },
     add_syscall() {},
     add_syscall_ret() {},
@@ -298,7 +352,8 @@ export function makeChain(asyncClient, syncPrimitive) {
 
 export function makeRw(asyncClient) {
   return {
-    async read(addr, len) { return asyncClient.read(addr, len); },
-    async write(addr, bytes) { return asyncClient.write(addr, bytes); },
+    // rw — ЕДИНСТВЕННЫЙ путь чтения/записи ЯДРА (не путать с p.readBytes = процесс)
+    async read(addr, len) { return asyncClient.readKernel(addr, len); },
+    async write(addr, bytes) { return asyncClient.writeKernel(addr, bytes); },
   };
 }

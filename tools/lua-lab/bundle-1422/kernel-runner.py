@@ -37,6 +37,8 @@ from primitive import P, MockBackend
 
 CMD_READ, CMD_WRITE, CMD_MALLOC, CMD_SYSCALL = 0x01, 0x02, 0x03, 0x04
 CMD_READY, CMD_REASON, CMD_PING = 0x05, 0x06, 0x07
+# ВАЖНО: память ПРОЦЕССА и память ЯДРА — разные пространства (см. jb1422 §15.4).
+CMD_READK, CMD_WRITEK = 0x08, 0x09
 STATUS_OK, STATUS_ERR = 0, 1
 
 
@@ -55,10 +57,10 @@ def read_frame(sock):
     """Read one request frame; returns (cmd, payload_bytes)."""
     head = recv_exact(sock, 1)
     cmd = head[0]
-    if cmd == CMD_READ:
+    if cmd in (CMD_READ, CMD_READK):
         addr, length = struct.unpack("<QQ", recv_exact(sock, 16))
         return cmd, {"addr": addr, "len": length}
-    if cmd == CMD_WRITE:
+    if cmd in (CMD_WRITE, CMD_WRITEK):
         addr, length = struct.unpack("<QQ", recv_exact(sock, 16))
         return cmd, {"addr": addr, "data": recv_exact(sock, length)}
     if cmd == CMD_MALLOC:
@@ -82,8 +84,13 @@ def handle_frame(p, cmd, args):
     """Execute one decoded frame against primitive p; returns reply bytes."""
     if cmd == CMD_READ:
         return struct.pack("<B", STATUS_OK) + p.read(args["addr"], args["len"])
+    if cmd == CMD_READK:
+        return struct.pack("<B", STATUS_OK) + p.read_kernel(args["addr"], args["len"])
     if cmd == CMD_WRITE:
         p.write(args["addr"], args["data"])
+        return struct.pack("<B", STATUS_OK)
+    if cmd == CMD_WRITEK:
+        p.write_kernel(args["addr"], args["data"])
         return struct.pack("<B", STATUS_OK)
     if cmd == CMD_MALLOC:
         return struct.pack("<B", STATUS_OK) + struct.pack("<Q", p.malloc(args["size"], args["align"]))
@@ -384,6 +391,16 @@ def _selftest():
         check("op%d syscall(202, ..)" % (19 + i,), ret == 0x10 + i, str(ret))
 
     check("20 binary operations executed", ops == 20, str(ops))
+
+    # семантика: p.readBytes (процесс) не должен отдавать ядро, rw/pipeReadBytes — должны
+    kb = MockKernelBackend()
+    kb.write_kernel(0xFFFFFFFF88880000, b"\x11\x22\x33\x44")
+    check("process read of kernel addr is NOT kernel data",
+          kb.read(0xFFFFFFFF88880000, 4) == b"\x00\x00\x00\x00",
+          kb.read(0xFFFFFFFF88880000, 4).hex())
+    check("rw/pipe kernel read returns kernel data",
+          kb.read_kernel(0xFFFFFFFF88880000, 4) == b"\x11\x22\x33\x44",
+          kb.read_kernel(0xFFFFFFFF88880000, 4).hex())
     client.close()
     server.stop()
     print("checks done, RESULT: " + ("PASS" if ok else "FAIL"))
@@ -431,8 +448,13 @@ class MockKernelBackend(MockBackend):
         return (addr & KERNEL_HI_MASK) == KERNEL_HI_MASK
 
     def read(self, addr, length):
-        if not self.is_kernel(addr):
-            return MockBackend.read(self, addr, length)
+        # память ПРОЦЕССА: синтетики ядра здесь нет (иначе stage 8 даёт ложный OK)
+        return MockBackend.read(self, addr, length)
+
+    def write(self, addr, data):
+        return MockBackend.write(self, addr, data)
+
+    def read_kernel(self, addr, length):
         off = addr & 0xFFFFFFFF
         if length == 4:
             if off in self.kstore:
@@ -449,9 +471,7 @@ class MockKernelBackend(MockBackend):
         return bytes(self.text[base:base + length]) if base + length <= len(self.text) else \
             bytes((self.text[(base + i) % len(self.text)] for i in range(length)))
 
-    def write(self, addr, data):
-        if not self.is_kernel(addr):
-            return MockBackend.write(self, addr, data)
+    def write_kernel(self, addr, data):
         value = 0
         for i in range(min(4, len(data))):
             value |= (data[i] & 0xFF) << (i * 8)

@@ -612,3 +612,101 @@ STAGE 13 [AIO sanity check (t1 trigger)]: OK — t1 отправлен (10000 б
 
 После оптимизации `recon-lua-vector` перепроверил свой TCP-прогон и получил те же цифры, что у нас:
 13 стадий, OK=13, DEGRADED=0, FAIL=0.
+
+
+### 15.4 Дополнительно (по итогам обмена с recon-lua-vector, контракт `p`)
+
+После включения в мост `p.readBytes/writeBytes` убраны ещё два побайтовых места:
+
+| место | было | стало |
+|---|---|---|
+| STAGE 1, чтение ответа routing-сокета | до ~528 `read1` (**~528 round-trip**) | **1** `p.readBytes` (буфер разбирается в JS) |
+| waiter-spray (стадия 3) | 64×2 `write4` = 128 round-trip | **1** `p.writeBytes` (3584 байта) |
+| ids/states в waiter-векторе | по одному `write4` на 4 байта | **1** bulk-обнуление |
+
+Логи подтверждают: `[kaslr] ответ сокета прочитан бульком: 528 байт (readBytes=true)`,
+`[waiter] spray 3584 байт записан bulk-методом writeBytes (1 round-trip)`.
+
+**Важное уточнение семантики (нашёл на своей же регрессии):** `p.readBytes` — это память
+**процесса**, а НЕ ядра. Я сначала оптимизировал `crossPipes` на `p.readBytes`, и стадия 8 стала
+`DEGRADED (pipe R/W attached (unverified))`: self-check по rodata не находил строку, потому что
+kernel-чтение ушло в память процесса (нули). Правильно: чтение ядра идёт через `rw` (`attachKernelRw`)
+или через pipe-специфичный `p.pipeReadBytes`, если мост его даёт. Исправлено, стадия 8 снова OK.
+
+Итоговый контракт, который реально использует kernel-часть:
+* `p`: `read1/4/8`, `write1/4/8`, `malloc(size,align)`, **`readBytes/writeBytes` (память процесса)**,
+  `pipeRead/pipeWrite` (+ опционально `pipeReadBytes` — bulk-чтение ЯДРА через pipe), `attachKernelPipe`, `ready`;
+* `chain`: `syscall(nr,...)→Promise<{low,hi?}>`, `rtmsg2()`, `add_syscall/add_syscall_ret`, `launch`;
+* `rw` (из `attachKernelRw`): `{read(addr,len), write(addr,bytes)}` — единственный путь чтения ЯДРА.
+
+Прогоны после всех правок: `--dry-run-full` → 13 стадий, OK=13, DEGRADED=0, FAIL=0;
+`--dry-run` → 13/OK=12/DEGRADED=1 (stage 8 без pipe); `selftest.sh` → `EXIT=0`.
+
+
+---
+
+## 16. Фикс регрессии стадии 1: дубликаты методов + три вида reply от моста
+
+### 16.1 Корень проблемы — две копии восьми методов
+
+В классе оказались **по две реализации** 8 методов: `leakKernelBase`, `verifyKbaseStage`,
+`probeKbaseArmed`, `routingSocketReply`, `copyIntoProcess`, `findAuthorRecordIn`, `findAuthorRecord`,
+`pinToSingleCore`. В JS **побеждает последняя** реализация, поэтому правки в первую копию были мёртвым
+кодом — отсюда «чиним, а всё равно падает».
+
+Удалён первый блок (строки 291–463, 173 строки). Теперь каждого метода ровно одна реализация
+(проверено подсчётом: `grep -c` → 1 для всех восьми). Функционально копии отличались только
+комментариями и одним условием, так что поведение не изменилось.
+
+### 16.2 Вторая причина: `{ptr, bytes}` с `bytes` как обычный Array
+
+Мост теперь отдаёт `{ptr, bytes}`. Но разбор был написан так:
+```js
+if (reply.bytes instanceof Uint8Array || ArrayBuffer.isView(reply.bytes)) ...
+else if (reply instanceof Uint8Array || ArrayBuffer.isView(reply)) ...
+else if (typeof reply === "object" && typeof reply.length === "number") ...
+else replyBytes = await readProcessBytes(reply, ...)   // сюда падал {ptr,bytes}!
+```
+Если `bytes` — **обычный массив** (`Array`), первые две ветки не срабатывали, у `{ptr,bytes}` нет
+`length`, и объект-обёртка уходила в примитив как «указатель» → мусор → `в ответе нет author-record`.
+
+Исправлено обобщённым нормализатором `toBytes()` (Uint8Array / любой TypedArray / Array / array-like)
+и явным разбором трёх видов ответа:
+
+| вид reply | как обрабатывается |
+|---|---|
+| `{ptr, bytes}` | берём `bytes` через `toBytes` (Array и TypedArray равноценны) |
+| готовый буфер (`Uint8Array`/`Array`) | берём как есть |
+| указатель (`I64`/`{off}`/число) | `p.readBytes(ptr, len)` или побайтовый фолбэк |
+
+Проверка нормализатора:
+```
+  Uint8Array         -> 4
+  Array (plain)      -> 4
+  {ptr, bytes:Array} -> 4
+  {ptr, bytes:U8}    -> 4
+```
+
+### 16.3 Дополнительно: устойчивый поиск author-record и диагностика
+
+`findAuthorRecordCandidates()` пробует три варианта: маркер `rtm_type` (`0x04 0x00`) с шагом 4,
+позицию «хвост минус `RET_SLOT`», и смещение 0. Кандидат выбирается по совпадению `ret & 0xffff`
+с `kaslr.retLow16`. Если ни один не подошёл — в лог печатаются **первые 48 байт ответа** и список
+кандидатов, чтобы точку расхождения было видно сразу:
+```
+[kaslr] ДИАГНОСТИКА: len=N, первые 48 байт = ...
+[kaslr] кандидаты author = [0, 496, 0], искали retLow16=0x6869
+```
+
+### 16.4 Проверки после фикса
+
+| тест | результат |
+|---|---|
+| `node tools/jb1422/kernel/relapse1422.js --dry-run-full` | **13 стадий, OK=13, DEGRADED=0, FAIL=0** |
+| `python3 tools/lua-lab/bundle-1422/demo-fullchain.py` (через TCP-примитив) | **13 стадий, OK=13, DEGRADED=0, FAIL=0**, EXIT=0 |
+| `--dry-run` | 13 / OK=12 / DEGRADED=1 (stage 8 без pipe) |
+| `--dry-run-no-oid` | 13 / OK=11 / DEGRADED=2 |
+| `--dry-run-kaslr-fail` | ожидаемый FAIL на стадии 4 (self-DoS guard) |
+| `selftest.sh` | `EXIT=0`, 17 тестов PASS=15 FAIL=0 SKIP=2 |
+
+Копия `tools/kexpl/relapse1422.js` синхронизирована.

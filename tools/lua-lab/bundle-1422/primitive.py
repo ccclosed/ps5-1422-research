@@ -87,6 +87,13 @@ class MockBackend(object):
         self.write(addr, b"\x00" * size)
         return addr
 
+    # -- kernel space (в MockBackend совпадает с процессом) -----------
+    def read_kernel(self, addr, length):
+        return self.read(addr, length)
+
+    def write_kernel(self, addr, data):
+        return self.write(addr, data)
+
     # -- syscall -----------------------------------------------------
     def syscall(self, num, args):
         self.syscall_log.append((num, tuple(args)))
@@ -183,6 +190,13 @@ class P(object):
 
     def write(self, addr, data):
         self._write(addr, data)
+
+    # -- kernel space (используется только через rw/pipeReadBytes) ----
+    def read_kernel(self, addr, length):
+        return self.backend.read_kernel(self._to_int(addr), int(length))
+
+    def write_kernel(self, addr, data):
+        self.backend.write_kernel(self._to_int(addr), data)
 
     # -- hex-string aliases (js/primitive.js contract) ---------------
     def _to_int(self, value):

