@@ -145,25 +145,21 @@ chain.rtmsg2() -> Uint8Array(512)  // первые 8: 04 00 00 00 00 00 00 00
                        .bytes      // он же (для кода, который ждёт {ptr, bytes})
 ```
 
-**Текущий статус (проверено):** по умолчанию мост отдаёт гибрид — он зелёный на текущем дереве
-(`13/13`). Чистый `{ptr, bytes}` (`PB_RTMSG2=object`) пока даёт `стадий=1 FAIL`: в
-`kernel/relapse1422.js` `routingSocketReply()` всё ещё вызывает `copyIntoProcess(reply)`, а тот
-делает `new Uint8Array(obj)` → **0 байт** (новые `toBytes()/replyToBytes()` в этом пути не
-используются). Нужная правка — одна строка в `routingSocketReply()`:
+**Финальный контракт (согласован с владельцем kernel-модуля):**
 
 ```js
-return this.copyIntoProcess(KernelExploit1422.toBytes(reply) ||
-                            KernelExploit1422.toBytes(reply && reply.bytes) || reply);
+chain.rtmsg2() -> { ptr, bytes }
+//   ptr   — адрес буфера в памяти ПРОЦЕССА (0x...)
+//   bytes — Uint8Array(512): первые 8 байт 04 00 00 00 00 00 00 00,
+//           ret по смещению 184: 69 68 b0 00 ff ff ff ff
 ```
 
-После неё переключаем дефолт на `PB_RTMSG2=object`; сам мост менять не придётся.
+Kernel принимает его в `routingSocketReply()`:
+`const bytes = toBytes(reply) || toBytes(reply && reply.bytes); if (bytes) return copyIntoProcess(bytes);`
 
-**Два пространства памяти (проверено на TCP):**
-- `p.readBytes/writeBytes`, `p.read1/4/8`, `p.write1/4/8` — **память ПРОЦЕССА**;
-- `rw.read/write` (attachKernelRw), `p.pipeReadBytes`, `p.pipeRead/pipeWrite` — **память ЯДРА**
-  (отдельные команды протокола 0x08/0x09). Если kernel читает ядро через `p.readBytes`, мок
-  отдаёт нули — это намеренно, чтобы ловить такую ошибку до консоли (stage 8 self-check).
+`PB_RTMSG2=hybrid` — **legacy-опция** для старого kernel: `Uint8Array` с полями `.ptr`/`.bytes`
+(старый путь звал `new Uint8Array(obj)` и получал 0 байт). Оба режима проверены на ПК: 13/13/0/0.
 
-Отладка: `PB_DEBUG=1 python3 demo-fullchain.py` печатает тип/длину/первые 8 байт/`ret@184` буфера
-`rtmsg2`. Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть
-DEGRADED/FAIL или `done != true` (переопределяется `EXPECTED_STAGES`).
+Отладка: `PB_DEBUG=1` печатает режим, тип, длину, первые 8 байт и `ret@184`.
+Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть DEGRADED/FAIL или
+`done != true` (переопределяется `EXPECTED_STAGES`).

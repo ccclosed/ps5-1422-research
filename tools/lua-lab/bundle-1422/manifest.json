@@ -22,7 +22,7 @@
     "sender_selftest": "PASS (8-byte LE framing)",
     "agent_lua_lua51_compile": "PASS",
     "run_sh": "7/7 PASS",
-    "fullchain_over_tcp": "PASS: 13 stages, OK=13, DEGRADED=0, FAIL=0 (hybrid rtmsg2, ~2.1 s)"
+    "fullchain_over_tcp": "PASS in BOTH bridge modes: object {ptr,bytes} (default) and hybrid (PB_RTMSG2=hybrid): 13 stages, OK=13, DEGRADED=0, FAIL=0, ~2.1 s"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -78,8 +78,8 @@
       "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
     },
     "README.md": {
-      "bytes": 11876,
-      "sha256": "525c2f75205ef4098dccc605894d464de06fa0eaf56c97953e13e99320fe4459"
+      "bytes": 11184,
+      "sha256": "adbe918e7eedf1104babd087452b8ca87c61f6162ad75104338d5657e36c08f9"
     },
     "demo-fullchain.py": {
       "bytes": 4863,
@@ -90,8 +90,8 @@
       "sha256": "b9e5df26638c8dccbfb389fb737bb56bac7d6037740fb04c45944cbae4d47a83"
     },
     "pb-tcp.mjs": {
-      "bytes": 15851,
-      "sha256": "f97ac834613e5cd2651c9d33fad2e3f6d777682e080509b3eea5cb29fd51cc90"
+      "bytes": 16242,
+      "sha256": "b17ab4758802d4b8ec774f5d1dcd2c66f4073982d925051355b1c9dedc4aec4c"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -108,7 +108,7 @@
     "stage13_trigger": "options.triggerPayload = t1_aio_wait_race.elf (10000 B)",
     "read_cache": "prefetch 4 KiB + invalidate on write (byte scanners speed-up)",
     "bulk_read": "p.readBytes/p.writeBytes — 1 round-trip per chunk (crossPipes fast path)",
-    "rtmsg2_contract": "default hybrid Uint8Array(512)+.ptr/.bytes (green); pure {ptr,bytes} needs kernel routingSocketReply -> copyIntoProcess(toBytes(reply)||reply.bytes||reply)",
+    "rtmsg2_contract": "FINAL: chain.rtmsg2() -> {ptr, bytes(Uint8Array 512)}; kernel routingSocketReply uses toBytes(reply)||toBytes(reply.bytes); hybrid is legacy PB_RTMSG2=hybrid",
     "memory_spaces": "process: p.readBytes/read1-8/write1-8; kernel: rw.*, p.pipeReadBytes/p.pipeRead/pipeWrite (proto 0x08/0x09)",
     "regression_guard": "demo-fullchain.py exit!=0 if stages<13/OK<13/DEGRADED/FAIL",
     "debug": "PB_DEBUG=1 prints rtmsg2 type/len/first8/ret@184"

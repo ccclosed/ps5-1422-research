@@ -710,3 +710,35 @@ else replyBytes = await readProcessBytes(reply, ...)   // сюда падал {p
 | `selftest.sh` | `EXIT=0`, 17 тестов PASS=15 FAIL=0 SKIP=2 |
 
 Копия `tools/kexpl/relapse1422.js` синхронизирована.
+
+
+### 16.5 Добивка: `routingSocketReply()` всё ещё заворачивал ответ в процессный буфер
+
+После первого фикса чистый `{ptr, bytes}` продолжал падать на стадии 1 — нашёл recon-lua-vector.
+Причина: `routingSocketReply()` делал `return this.copyIntoProcess(reply);`, а `copyIntoProcess()`
+считал длину как `new Uint8Array({ptr, bytes})` = **0 байт** → `replyLen = 0` → читались 16 нулевых
+байт → «нет author-record». Новые хелперы в этом пути просто не участвовали.
+
+Исправлено:
+1. `routingSocketReply()` **больше не оборачивает** ответ: возвращает его как есть, а все формы
+   (`{ptr,bytes}` / буфер / указатель) разбирает `replyToBytes()` в стадии 1.
+2. `copyIntoProcess()` стал безопасным: если на вход пришло не-байтовое (например `{ptr,bytes}`),
+   возвращает объект без изменений, а не нулевой буфер.
+3. Legacy `findAuthorRecord()` больше не зависит от устаревшего `replyLen` (дефолт 512).
+4. Добавлен регрессионный режим **`--dry-run-objreply`**: мок отдаёт ЧИСТЫЙ `{ ptr, bytes }`,
+   как мост по умолчанию. Это защита от повторения бага.
+
+Прогоны:
+
+| тест | результат |
+|---|---|
+| `--dry-run-objreply` (чистый `{ptr,bytes}`) | **13 стадий, OK=13, DEGRADED=0, FAIL=0** (было: стадия 1 FAIL) |
+| `--dry-run-full` (reply = Uint8Array) | 13 / OK=13 / DEGRADED=0 |
+| `demo-fullchain.py` (TCP-примитив) | 13 / OK=13 / DEGRADED=0, EXIT=0 |
+| `--dry-run` | 13 / OK=12 / DEGRADED=1 |
+| `--dry-run-no-oid` | 13 / OK=11 / DEGRADED=2 |
+| `--dry-run-kaslr-fail` | FAIL на стадии 4 (guard) — ожидаемо |
+| `selftest.sh` | EXIT=0 (17 тестов, PASS=15, FAIL=0, SKIP=2) |
+
+Согласованный контракт reply: `{ ptr, bytes }`, где `bytes` — `Uint8Array(512)` (Array тоже принимается),
+`ptr` — адрес в памяти процесса; hybrid (Uint8Array с полями `.ptr/.bytes`) поддержан как совместимость.
