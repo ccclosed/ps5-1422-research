@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — реентерабельность</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only. Each test measures whether the engine re-enters JS while it is
+   already inside a JS-visible operation. No exploit code is involved. */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('Реентерабельность', 'Повторный вход в JS из платформенных вызовов — без эксплойта. ' +
+    'Отдельно измеряется блокировка главного потока синхронным XHR.');
+
+  var util = PS5JB.util;
+  var results = { tests: [], sync_xhr: [], surfaces_found: 0 };
+
+  var section = PS5JB.ui.section('Тесты', 'Каждый тест изолирован: исключение в одном не мешает остальным');
+  var body = PS5JB.ui.table(section, ['статус', 'тест', 'результат']);
+  var summarySection = PS5JB.ui.section('Сводка', 'Сколько поверхностей реентерабельности подтвердилось');
+  var summaryBody = PS5JB.ui.table(summarySection, ['итог', 'значение', '']);
+
+  var tests = [];
+  var currentIndex = 0;
+
+  function addTest(name, description, fn) {
+    tests.push({ name: name, description: description, fn: fn });
+  }
+
+  function record(name, result) {
+    results.tests.push({ name: name, result: result });
+    var status = result.fired ? 'ok' : (result.skipped ? 'warn' : 'fail');
+    if (result.fired) {
+      results.surfaces_found++;
+    }
+    var text = result.note || ((result.fired ? 'вход произошёл' : 'вход не произошёл') +
+      (result.depth !== undefined ? ', глубина ' + result.depth : '') +
+      (result.ms !== undefined ? ', ' + util.ms(result.ms) : ''));
+    PS5JB.ui.row(body, status, name, text);
+  }
+
+  function runNext() {
+    if (currentIndex >= tests.length) {
+      finish();
+      return;
+    }
+    var test = tests[currentIndex++];
+    var started = util.now();
+    try {
+      test.fn(function (result) {
+        result.ms = util.round(util.now() - started, 1);
+        record(test.name, result);
+        setTimeout(runNext, 0);
+      });
+    } catch (err) {
+      record(test.name, { fired: false, error: String(err), ms: util.round(util.now() - started, 1) });
+      setTimeout(runNext, 0);
+    }
+  }
+
+  /* ------------------------------------------------------- 1. getter reentry */
+  addTest('getter', 'Геттер одного свойства читает другое свойство того же объекта', function (done) {
+    var depth = 0;
+    var object = {};
+    var fired = false;
+    Object.defineProperty(object, 'a', {
+      get: function () {
+        fired = true;
+        depth++;
+        return depth < 3 ? object.b : 'deep';
+      }
+    });
+    Object.defineProperty(object, 'b', {
+      get: function () {
+        depth++;
+        return object.a;
+      }
+    });
+    var value = object.a;
+    done({ fired: fired, depth: depth, note: 'значение=' + value + ', глубина=' + depth });
+  });
+
+  /* -------------------------------------------------------- 2. proxy reentry */
+  addTest('proxy', 'get-ловушка Proxy читает другое поле через тот же Proxy', function (done) {
+    if (typeof Proxy !== 'function') {
+      done({ fired: false, skipped: true, note: 'Proxy отсутствует' });
+      return;
+    }
+    var depth = 0;
+    var target = { a: 1, b: 2 };
+    var proxy = new Proxy(target, {
+      get: function (obj, key) {
+        depth++;
+        if (depth > 5) {
+          return 'stop';
+        }
+        if (key === 'a') {
+          return proxy.b;
+        }
+        return obj[key];
+      }
+    });
+    var value = proxy.a;
+    done({ fired: depth > 2, depth: depth, note: 'значение=' + value });
+  });
+
+  /* ------------------------------------------------- 3. nested event dispatch */
+  addTest('dispatchEvent', 'dispatchEvent внутри обработчика того же типа события', function (done) {
+    var target = document.createElement('div');
+    var depth = 0;
+    var order = [];
+    target.addEventListener('probe', function onEvent(event) {
+      depth = Math.max(depth, event.detail || 0);
+      order.push(event.detail || 0);
+      if ((event.detail || 0) < 3) {
+        var nested = document.createEvent('CustomEvent');
+        nested.initCustomEvent('probe', false, false, (event.detail || 0) + 1);
+        target.dispatchEvent(nested);
+      }
+    }, false);
+    var first = document.createEvent('CustomEvent');
+    first.initCustomEvent('probe', false, false, 0);
+    target.dispatchEvent(first);
+    done({ fired: order.length > 1, depth: depth, note: 'порядок=' + order.join('>') });
+  });
+
+  /* ------------------------------------------------ 4. mutation during sort */
+  addTest('sort-compare', 'Компаратор sort() мутирует сортируемый массив', function (done) {
+    var array = [5, 3, 8, 1, 9, 2, 7, 4, 6, 0];
+    var mutations = 0;
+    var depth = 0;
+    try {
+      array.sort(function (a, b) {
+        depth++;
+        if (mutations < 5) {
+          mutations++;
+          array.push(100 + mutations);
+        }
+        return a - b;
+      });
+      done({ fired: mutations > 0, depth: depth, note: 'мутаций=' + mutations + ', длина=' + array.length });
+    } catch (err) {
+      done({ fired: mutations > 0, depth: depth, note: 'исключение после ' + mutations + ' мутаций: ' + err });
+    }
+  });
+
+  /* ------------------------------------------------- 5. valueOf/toString loop */
+  addTest('valueOf', 'valueOf читает свойство того же объекта во время приведения к числу', function (done) {
+    var depth = 0;
+    var object = {
+      valueOf: function () {
+        depth++;
+        if (depth > 3) {
+          return 1;
+        }
+        var peek = object.extra;   /* re-enters the property lookup */
+        return peek === undefined ? 2 : peek;
+      },
+      extra: 7
+    };
+    var sum = object + 1;
+    done({ fired: depth > 0, depth: depth, note: 'object+1=' + sum });
+  });
+
+  /* ------------------------------------------------------ 6. JSON replacer */
+  addTest('json-replacer', 'replacer у JSON.stringify меняет объект во время обхода', function (done) {
+    var object = { a: 1, b: { c: 2 } };
+    var calls = 0;
+    var mutated = false;
+    var text = JSON.stringify(object, function (key, value) {
+      calls++;
+      if (calls === 1) {
+        object.added = 'yes';
+        mutated = true;
+      }
+      return value;
+    });
+    done({ fired: mutated, depth: calls, note: 'вызовов replacer=' + calls + ', длина JSON=' + text.length });
+  });
+
+  /* --------------------------------------------------- 7. stack formatting */
+  addTest('prepareStackTrace', 'Error.prepareStackTrace вызывает код во время форматирования стека', function (done) {
+    var original = Error.prepareStackTrace;
+    var fired = false;
+    var depth = 0;
+    try {
+      Error.prepareStackTrace = function (error, frames) {
+        fired = true;
+        depth++;
+        if (depth > 2) {
+          return 'stack:' + frames.length;
+        }
+        /* Asking for .stack again from inside the formatter is the re-entry. */
+        var nested = new Error('inner');
+        return String(nested.stack).length + '/' + frames.length;
+      };
+      var root = new Error('outer');
+      var text = String(root.stack);
+      done({ fired: fired, depth: depth, note: 'stack=' + text.slice(0, 60) });
+    } finally {
+      Error.prepareStackTrace = original;
+    }
+  });
+
+  /* ----------------------------------------------------- 8. microtask reentry */
+  addTest('promise-then', 'then() резолвится изнутри другого then() (микрозадачи)', function (done) {
+    if (typeof Promise !== 'function') {
+      done({ fired: false, skipped: true, note: 'Promise отсутствует' });
+      return;
+    }
+    var depth = 0;
+    var nestedRan = false;
+    Promise.resolve().then(function () {
+      depth++;
+      return Promise.resolve().then(function () {
+        depth++;
+        nestedRan = true;
+      });
+    }).then(function () {
+      done({ fired: nestedRan, depth: depth, note: 'микрозадач=' + depth });
+    });
+  });
+
+  /* ---------------------------------------------- 9. sync XHR inside listener */
+  addTest('sync-xhr', 'Синхронный XHR внутри обработчика события блокирует главный поток', function (done) {
+    var target = document.createElement('div');
+    var started = util.now();
+    var status = -1;
+    var blockMs = 0;
+    target.addEventListener('go', function () {
+      var xhr = new XMLHttpRequest();
+      var inner = util.now();
+      try {
+        xhr.open('GET', '/delay?ms=60&probe=reentry', false);  /* false = synchronous */
+        xhr.send(null);
+        status = xhr.status;
+      } catch (err) {
+        status = -1;
+      }
+      blockMs = util.now() - inner;
+    }, false);
+    var event = document.createEvent('CustomEvent');
+    event.initCustomEvent('go', false, false, null);
+    target.dispatchEvent(event);
+    results.sync_xhr.push({ context: 'event-listener', block_ms: util.round(blockMs, 1), status: status });
+    done({
+      fired: status === 200,
+      depth: 1,
+      ms: util.round(util.now() - started, 1),
+      note: 'HTTP ' + status + ', поток заблокирован на ' + util.ms(blockMs)
+    });
+  });
+
+  /* ------------------------------------------- 10. sync XHR inside a getter */
+  addTest('sync-xhr-in-getter', 'Синхронный XHR внутри геттера: платформа входит в JS повторно', function (done) {
+    var object = {};
+    var status = -1;
+    var blockMs = 0;
+    Object.defineProperty(object, 'remote', {
+      get: function () {
+        var xhr = new XMLHttpRequest();
+        var inner = util.now();
+        try {
+          xhr.open('GET', '/delay?ms=40&probe=getter', false);
+          xhr.send(null);
+          status = xhr.status;
+        } catch (err) {
+          status = -1;
+        }
+        blockMs = util.now() - inner;
+        return 'fetched';
+      }
+    });
+    var value = object.remote;
+    results.sync_xhr.push({ context: 'getter', block_ms: util.round(blockMs, 1), status: status });
+    done({
+      fired: status === 200,
+      depth: 1,
+      note: value + ', HTTP ' + status + ', блокировка ' + util.ms(blockMs)
+    });
+  });
+
+  function finish() {
+    PS5JB.ui.row(summaryBody, results.surfaces_found ? 'ok' : 'fail', 'поверхностей подтверждено',
+      results.surfaces_found + ' из ' + tests.length);
+    var blocked = 0;
+    for (var i = 0; i < results.sync_xhr.length; i++) {
+      blocked += results.sync_xhr[i].block_ms;
+    }
+    PS5JB.ui.row(summaryBody, 'info', 'суммарная блокировка sync XHR', util.ms(blocked));
+    PS5JB.ui.row(summaryBody, 'info', 'поток', navigator.hardwareConcurrency + ' ядер доступно JS');
+    PS5JB.mark('reentry', results);
+    PS5JB.send('reentry');
+    PS5JB.status('готово: ' + results.surfaces_found + '/' + tests.length + ' поверхностей');
+  }
+
+  PS5JB.send('reentry', { event: 'started' });
+  setTimeout(runNext, 50);
+}());
+</script>
+</body>
+</html>

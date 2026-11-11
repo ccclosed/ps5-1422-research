@@ -1,0 +1,171 @@
+{
+ "a_path": "tools/libmap/profiles-cyberpunk.json",
+ "b_path": "tools/libmap/profiles-codeviolet.json",
+ "modules_only_a": [
+  "libSceFace.prx",
+  "libSceFaceTracker.prx"
+ ],
+ "modules_only_b": [
+  "libSceFontGsm.prx"
+ ],
+ "modules": [
+  {
+   "module": "libSceJobManager.prx",
+   "build_a": null,
+   "build_b": null,
+   "nids_a": 114,
+   "nids_b": 116,
+   "common": 98,
+   "only_a": 16,
+   "only_b": 18,
+   "removed": [
+    "+TN0oRTBxJQ#C#D",
+    "Abendgtz+3o#D#E",
+    "H2e8t5ScQGc#B#C",
+    "HV4j+E0MBHE#D#E",
+    "IOnSvHzqu6A#A#B",
+    "JOWmDrl+j20#D#E",
+    "MELi-cKqWq0#B#C",
+    "T6xuVw0KUJo#D#E",
+    "VTKezfYu-v4#G#A",
+    "ZT4ODD2Ts9o#B#C",
+    "hL7C0IRpWZI#D#E",
+    "k0E7vkgqAuE#D#E"
+   ],
+   "added": [
+    "+iAOE3jCnkk#C#D",
+    "0ZOG0jc9nRg#D#E",
+    "3BytPOQgVKc#B#C",
+    "3qxgM4ezETA#A#B",
+    "6nths4DHNrs#D#E",
+    "8Kly1JrJUlw#D#E",
+    "BfBDZGbti7A#D#E",
+    "D9sr1xGUriE#D#E",
+    "L1SBTkC+Cvw#B#C",
+    "MLWl90SFWNE#B#C",
+    "NKIzURsgV7I#D#E",
+    "dbOlWdppb4o#D#E"
+   ],
+   "libs_only_a": [],
+   "libs_only_b": [],
+   "tramp_a": 143,
+   "tramp_b": 159,
+   "tramp_delta": 16
+  },
+  {
+   "module": "libSceNpCppWebApi.prx",
+   "build_a": null,
+   "build_b": null,
+   "nids_a": 36798,
+   "nids_b": 33947,
+   "common": 30511,
+   "only_a": 6287,
+   "only_b": 3436,
+   "removed": [
+    "+0NTVFIf-Do#G#A",
+    "+2BM9gBawwQ#G#A",
+    "+2iVb5Lkdg8#G#A",
+    "+2ls4vgvmKw#G#A",
+    "+30qCF6MXaI#G#A",
+    "+4WxtBCTplY#G#A",
+    "+4d5NmpZp6w#G#A",
+    "+4d9qghuMnk#G#A",
+    "+5xMqRsZgfE#G#A",
+    "+6Zc0N41Xyc#G#A",
+    "+6eelmiPZ4g#G#A",
+    "+747fDWSknE#G#A"
+   ],
+   "added": [
+    "++v6m1cDvuc#G#A",
+    "+-g1zrRoVdI#G#A",
+    "+0Gl8y4tkuM#G#A",
+    "+1ck6lGIk-o#G#A",
+    "+2GKXkOLMa4#G#A",
+    "+2Lcx9ApIak#G#A",
+    "+5VJ8NrAwAU#G#A",
+    "+5iTkwxW158#G#A",
+    "+6ru7Z3mFC0#G#A",
+    "+7+ZbKm6HJ4#G#A",
+    "+70DV488-hg#G#A",
+    "+8TdsN+0res#G#A"
+   ],
+   "libs_only_a": [],
+   "libs_only_b": [],
+   "tramp_a": 95,
+   "tramp_b": 96,
+   "tramp_delta": 1
+  },
+  {
+   "module": "libScePfs.prx",
+   "build_a": null,
+   "build_b": null,
+   "nids_a": 19,
+   "nids_b": 19,
+   "common": 19,
+   "only_a": 0,
+   "only_b": 0,
+   "removed": [],
+   "added": [],
+   "libs_only_a": [],
+   "libs_only_b": [],
+   "tramp_a": 21,
+   "tramp_b": 22,
+   "tramp_delta": 1
+  },
+  {
+   "module": "libc.prx",
+   "build_a": "J01625764",
+   "build_b": "J03547016",
+   "nids_a": 2132,
+   "nids_b": 2466,
+   "common": 2047,
+   "only_a": 85,
+   "only_b": 419,
+   "removed": [
+    "0JidN6q9yGo#D#A",
+    "0fkFA3za2N8#D#A",
+    "1uf1SQsj5go#D#A",
+    "2M9VZGYPHLI#D#A",
+    "2Olt9gqOauQ#D#A",
+    "2PoQu-K2qXk#D#A",
+    "2R2j1QezUGM#D#A",
+    "2X5agFjKxMc#D#A",
+    "2pJJ0dl-aPQ#D#A",
+    "3rJJb81CDM4#D#A",
+    "62KCwEMmzcM#A#B",
+    "6QU40olMkOM#D#A"
+   ],
+   "added": [
+    "+8jItptyeQQ#D#A",
+    "+AqTGiV4vBA#D#A",
+    "+ROCBP8cIyY#D#A",
+    "+fAmL52-yfQ#D#A",
+    "-3ZujD7JX9c#D#A",
+    "-7vr7t-uto8#D#A",
+    "-89UFw-Igq0#D#A",
+    "-AmVeGEwTx0#D#A",
+    "-EgSegeAKl4#D#A",
+    "-WAEp-LsQK8#D#A",
+    "-Wq7Sj-ee9s#D#A",
+    "-b+Avqa2v9k#D#A"
+   ],
+   "libs_only_a": [],
+   "libs_only_b": [],
+   "tramp_a": 110,
+   "tramp_b": 131,
+   "tramp_delta": 21
+  }
+ ],
+ "libs_union_only_a": [
+  "libSceFace",
+  "libSceFace.prx",
+  "libSceFaceTracker",
+  "libSceFaceTracker.prx",
+  "libScePosix"
+ ],
+ "libs_union_only_b": [
+  "libSceFont",
+  "libSceFontGsm",
+  "libSceFontGsm.prx"
+ ]
+}

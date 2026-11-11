@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — стенд доставки</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only: see probe.js header. */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('ps5jb probe', 'Локальный HTTPS-стенд: страницы-пробы для браузера PS5');
+
+  var main = document.getElementById('main');
+
+  var intro = PS5JB.ui.section('Что это', 'Стенд отдаёт пробы по HTTPS и пишет каждый запрос вместе с User-Agent в лог сервера. ' +
+    'Каждая страница дополнительно отправляет отчёт на POST /beacon, поэтому результат виден в логе, ' +
+    'даже если на консоли нет доступа к JS-консоли.');
+  PS5JB.ui.note(intro, 'Пробы намеренно написаны на ES5: стенд не должен зависеть от возможностей, которые он измеряет. ' +
+    'Более новые конструкции проверяются через new Function() и показываются как «да/нет».');
+
+  var tiles = PS5JB.ui.h('div', 'tiles');
+  var links = [
+    ['/engine.html', 'engine.html', 'Движок и фичи', 'UA, WebKit/Blink, WebGL, WebAssembly, память, синтаксис ES6+'],
+    ['/alloc.html', 'alloc.html', 'Аллокации', 'Максимальный ArrayBuffer, фрагментация, строки, поведение при OOM'],
+    ['/jit.html', 'jit.html', 'JIT', 'WebAssembly, скорость цикла, прогрев, эвристика включённого JIT'],
+    ['/reentry.html', 'reentry.html', 'Реентерабельность', 'Повторный вход в JS из геттеров, событий, sort, XHR'],
+    ['/chain.html', 'chain.html', 'Заготовка цепочки', 'Стадии, примитивы и точки расширения под реальный эксплойт']
+  ];
+  for (var i = 0; i < links.length; i++) {
+    var tile = PS5JB.ui.h('a', 'tile');
+    tile.href = links[i][0];
+    var strong = PS5JB.ui.h('strong', null, links[i][1]);
+    var hint = PS5JB.ui.h('span', null, links[i][2] + ' — ' + links[i][3]);
+    tile.appendChild(strong);
+    tile.appendChild(hint);
+    tiles.appendChild(tile);
+  }
+  intro.appendChild(tiles);
+
+  /* ------------------------------------------------------- server reachability */
+  var link = PS5JB.ui.section('Связь со стендом', 'Проверяет, что страница может делать POST на /beacon и читать /stats.');
+  var linkBody = PS5JB.ui.table(link, ['проба', 'что проверяем', 'результат']);
+  link.appendChild(PS5JB.button('Проверить связь', checkLink));
+
+  function checkLink() {
+    PS5JB.ui.row(linkBody, 'info', 'beacon', 'POST /beacon (JSON)');
+    var started = PS5JB.util.now();
+    PS5JB.report.send('index-link', { event: 'link-check' }, { href: location.href }, function (status, text) {
+      var verdict = status === 200 ? 'ok' : 'fail';
+      PS5JB.mark('beacon_status', status);
+      var row = PS5JB.ui.row(linkBody, verdict, 'beacon', status + ' за ' + PS5JB.util.ms(PS5JB.util.now() - started) + ' ' + (text || ''));
+      row.className = 'link-beacon-' + status;
+    });
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/stats', true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) { return; }
+      var ok = xhr.status === 200;
+      var summary = '';
+      try {
+        var stats = JSON.parse(xhr.responseText);
+        summary = 'запросов=' + stats.total_requests + ', beacon=' + stats.beacons +
+          ', UA=' + (stats.unique_user_agents || []).length;
+        PS5JB.mark('stats', stats);
+      } catch (err) {
+        summary = 'не разобрал JSON: ' + err;
+      }
+      PS5JB.ui.row(linkBody, ok ? 'ok' : 'fail', 'stats', xhr.status + ' — ' + summary);
+    };
+    xhr.send(null);
+  }
+
+  /* --------------------------------------------------------------- env summary */
+  var envSection = PS5JB.ui.section('Окружение', 'Краткая сводка; подробности на /engine.html');
+  var envBody = PS5JB.ui.table(envSection, ['проба', 'значение', '']);
+  var env = PS5JB.env();
+  var engine = PS5JB.engineGuess();
+  var gl = PS5JB.webglInfo();
+
+  PS5JB.ui.row(envBody, 'info', 'User-Agent', env.userAgent);
+  PS5JB.ui.row(envBody, engine.family === 'unknown' ? 'warn' : 'ok', 'движок (догадка)', engine.guess + ' (family=' + engine.family + ')');
+  PS5JB.ui.row(envBody, 'info', 'экран', env.screen ? env.screen.width + 'x' + env.screen.height +
+    ' @' + env.screen.devicePixelRatio + ', depth=' + env.screen.colorDepth : 'нет screen');
+  PS5JB.ui.row(envBody, gl.available ? 'ok' : 'warn', 'WebGL renderer',
+    gl.available ? (gl.unmaskedRenderer || gl.renderer) : 'недоступен');
+  PS5JB.ui.row(envBody, typeof WebAssembly === 'object' ? 'ok' : 'warn', 'WebAssembly', typeof WebAssembly);
+  PS5JB.ui.row(envBody, 'info', 'hardwareConcurrency', env.hardwareConcurrency);
+
+  PS5JB.mark('env', env);
+  PS5JB.mark('engine', engine);
+  PS5JB.mark('webgl', gl);
+  PS5JB.send('index');
+
+  PS5JB.status('готово, отчёт отправлен');
+}());
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!--
+  entry-1422 — хаб. Открой на консоли этот файл первым; он показывает, что стенд живой,
+  и даёт ссылки на пробы. Ничего не триггерит.
+-->
+<meta charset="utf-8">
+<title>entry-1422 hub</title>
+<style>
+  body{font:15px/1.5 monospace;background:#111;color:#ddd;margin:20px;max-width:900px}
+  a{color:#7fd} li{margin:6px 0} pre{background:#000;padding:8px;border:1px solid #333}
+</style>
+<h1>entry-1422 — пробы для PS5 14.22 (WebKit entry)</h1>
+<p>Задача: за один заход определить, закрыт ли в 14.22 вход через
+<b>реентерабельный Canvas2D getContext()</b> (CVE-2026-43720 / WebKit bug 313175),
+и какой ветке Safari соответствует движок.</p>
+<ol>
+  <li><a href="p1-canvas-reentry.html">p1 — canvas reentrancy oracle</a> — главный ответ:
+      <b>FIXED / VULNERABLE / UNKNOWN</b>. Запускать первым, он безопасный (не роняет процесс).</li>
+  <li><a href="p2-engine-fingerprint.html">p2 — engine fingerprint</a> — ветка Safari
+      (17.0–17.3 / ≥17.4 / ≥18.x), чтобы понять, ребейзила ли Sony движок.</li>
+  <li><a href="p3-crash-oracle.html">p3 — crash oracle</a> — <b>только если p1 = VULNERABLE</b>.
+      Требует <code>?armed=1</code>; чтение freed-контекста может уронить WebProcess.</li>
+</ol>
+<p>Результаты уходят на <code>POST /beacon</code> сервера стенда и дублируются на экране.
+Смотрите лог сервера: <code>tools/probe/logs/beacons.jsonl</code> и <code>requests.jsonl</code>.</p>
+<pre>python3 tools/probe/serve.py --root tools/probe/bundles/entry-1422 --port 8443</pre>
+<p>Что искать в логе — <a href="README.md">README.md</a> (раздел «Что смотреть в логе»).</p>
+<script>
+  // лёгкий beacon, чтобы в requests.jsonl было видно, что хаб открылся
+  try { fetch("/beacon", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag: "HUB-OPEN", ua: navigator.userAgent }) }); } catch (e) {}
+</script>

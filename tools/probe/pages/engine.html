@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — движок и фичи</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only. Everything newer is probed through new Function(). */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('Движок и фичи', 'Что именно за браузер и какие возможности реально доступны');
+
+  var main = document.getElementById('main');
+
+  /* ------------------------------------------------------------- identity */
+  var idSection = PS5JB.ui.section('Идентификация', 'UA — единственный источник версии движка, которую отдаёт браузер.');
+  var idBody = PS5JB.ui.table(idSection, ['проба', 'значение', '']);
+  var env = PS5JB.env();
+  var engine = PS5JB.engineGuess();
+
+  PS5JB.ui.row(idBody, 'info', 'userAgent', env.userAgent);
+  PS5JB.ui.row(idBody, 'info', 'appVersion', env.appVersion);
+  PS5JB.ui.row(idBody, 'info', 'vendor', env.vendor);
+  PS5JB.ui.row(idBody, 'info', 'platform', env.platform);
+  PS5JB.ui.row(idBody, 'info', 'языки', (env.languages || []).join(', '));
+  PS5JB.ui.row(idBody, 'info', 'cookieEnabled', String(env.cookieEnabled));
+  PS5JB.ui.row(idBody, 'info', 'webdriver', String(env.webdriver));
+  PS5JB.ui.row(idBody, 'info', 'plugins/mimeTypes', env.plugins + ' / ' + env.mimeTypes);
+  PS5JB.ui.row(idBody, engine.family === 'unknown' ? 'warn' : 'ok', 'движок', engine.guess);
+
+  /* WebKit-specific globals are a stronger signal than the UA. */
+  var jscHints = {
+    'window.webkit': typeof window.webkit === 'object',
+    'window.internals (WebKit testing)': typeof window.internals === 'object',
+    '$vm (JSC debug shell)': typeof window.$vm === 'object',
+    'webkitRequestAnimationFrame': typeof window.webkitRequestAnimationFrame === 'function',
+    'webkitURL': typeof window.webkitURL === 'function',
+    'GestureEvent': typeof window.GestureEvent === 'function'
+  };
+  for (var hint in jscHints) {
+    if (Object.prototype.hasOwnProperty.call(jscHints, hint)) {
+      PS5JB.ui.row(idBody, jscHints[hint] ? 'ok' : 'warn', hint, String(jscHints[hint]));
+    }
+  }
+  PS5JB.ui.note(idSection, 'Версию системного ПО (например, 14.22) браузер в UA не сообщает. ' +
+    'Её нужно определять по настройкам консоли; страница может лишь зафиксировать UA и набор фич.');
+
+  /* --------------------------------------------------------------- display */
+  var screenSection = PS5JB.ui.section('Экран и ввод', 'Разрешение и доступные типы событий');
+  var screenBody = PS5JB.ui.table(screenSection, ['проба', 'значение', '']);
+  var screenInfo = env.screen || {};
+  PS5JB.ui.row(screenBody, 'info', 'screen', screenInfo.width + 'x' + screenInfo.height);
+  PS5JB.ui.row(screenBody, 'info', 'avail', screenInfo.availWidth + 'x' + screenInfo.availHeight);
+  PS5JB.ui.row(screenBody, 'info', 'colorDepth', String(screenInfo.colorDepth));
+  PS5JB.ui.row(screenBody, 'info', 'devicePixelRatio', String(screenInfo.devicePixelRatio));
+  PS5JB.ui.row(screenBody, 'info', 'maxTouchPoints', String(env.maxTouchPoints));
+  PS5JB.ui.row(screenBody, 'info', 'window.inner', window.innerWidth + 'x' + window.innerHeight);
+
+  /* ---------------------------------------------------------------- memory */
+  var memSection = PS5JB.ui.section('Память', 'Лимиты кучи, если движок их публикует');
+  var memBody = PS5JB.ui.table(memSection, ['проба', 'значение', '']);
+  if (env.heap) {
+    PS5JB.ui.row(memBody, 'ok', 'jsHeapSizeLimit', PS5JB.util.bytes(env.heap.jsHeapSizeLimit || 0));
+    PS5JB.ui.row(memBody, 'info', 'totalJSHeapSize', PS5JB.util.bytes(env.heap.totalJSHeapSize || 0));
+    PS5JB.ui.row(memBody, 'info', 'usedJSHeapSize', PS5JB.util.bytes(env.heap.usedJSHeapSize || 0));
+  } else {
+    PS5JB.ui.row(memBody, 'warn', 'performance.memory', 'не публикуется движком');
+  }
+  PS5JB.ui.row(memBody, 'info', 'navigator.deviceMemory', String(env.deviceMemory));
+  PS5JB.ui.row(memBody, 'info', 'navigator.hardwareConcurrency', String(env.hardwareConcurrency));
+
+  /* -------------------------------------------------------------- graphics */
+  var glSection = PS5JB.ui.section('Графика', 'WebGL и видео-кодеки: полезно для идентификации платформы и для heap-spray через canvas');
+  var glBody = PS5JB.ui.table(glSection, ['проба', 'значение', '']);
+  var gl = PS5JB.webglInfo();
+  if (gl.available) {
+    PS5JB.ui.row(glBody, 'ok', 'WebGL VERSION', gl.version);
+    PS5JB.ui.row(glBody, 'info', 'VENDOR', gl.vendor);
+    PS5JB.ui.row(glBody, 'info', 'RENDERER', gl.renderer);
+    PS5JB.ui.row(glBody, 'info', 'unmasked', (gl.unmaskedVendor || '?') + ' / ' + (gl.unmaskedRenderer || '?'));
+    PS5JB.ui.row(glBody, 'info', 'SHADING_LANGUAGE', gl.shading);
+    PS5JB.ui.row(glBody, 'info', 'MAX_TEXTURE_SIZE', String(gl.maxTexture));
+    PS5JB.ui.row(glBody, 'info', 'MAX_VIEWPORT_DIMS', gl.maxViewport ? gl.maxViewport.join('x') : '?');
+  } else {
+    PS5JB.ui.row(glBody, 'fail', 'WebGL', gl.error || 'контекст не создан');
+  }
+  var video = document.createElement('video');
+  var codecs = [
+    ['H.264', 'video/mp4; codecs="avc1.42E01E"'],
+    ['HEVC', 'video/mp4; codecs="hvc1.1.6.L93.B0"'],
+    ['VP8', 'video/webm; codecs="vp8"'],
+    ['VP9', 'video/webm; codecs="vp9"'],
+    ['AV1', 'video/mp4; codecs="av01.0.05M.08"']
+  ];
+  for (var i = 0; i < codecs.length; i++) {
+    var verdict = video.canPlayType ? (video.canPlayType(codecs[i][1]) || 'нет') : 'нет canPlayType';
+    PS5JB.ui.row(glBody, verdict === 'нет' ? 'warn' : 'ok', codecs[i][0], verdict);
+  }
+
+  /* -------------------------------------------------------------- features */
+  var featSection = PS5JB.ui.section('Возможности API', 'Наличие конструкторов и объектов; «error» означает, что проверка сама бросила исключение');
+  var featBody = PS5JB.ui.table(featSection, ['проба', 'значение', '']);
+  var features = PS5JB.features();
+  var positives = 0;
+  var total = 0;
+  for (var name in features) {
+    if (!Object.prototype.hasOwnProperty.call(features, name) || name === 'syntax') {
+      continue;
+    }
+    total++;
+    var value = features[name];
+    var status = value === true ? 'ok' : (value === false ? 'warn' : 'fail');
+    if (value === true) { positives++; }
+    PS5JB.ui.row(featBody, status, name, String(value));
+  }
+
+  /* ---------------------------------------------------------------- syntax */
+  var synSection = PS5JB.ui.section('Синтаксис JS', 'Проверка компиляции без выполнения: new Function(src) в try/catch');
+  var synBody = PS5JB.ui.table(synSection, ['проба', 'значение', '']);
+  var supported = [];
+  for (var construct in features.syntax) {
+    if (!Object.prototype.hasOwnProperty.call(features.syntax, construct)) {
+      continue;
+    }
+    var ok = features.syntax[construct];
+    if (ok) { supported.push(construct); }
+    PS5JB.ui.row(synBody, ok ? 'ok' : 'warn', construct, ok ? 'поддерживается' : 'синтаксическая ошибка');
+  }
+  PS5JB.ui.note(synSection, 'Поддержано ' + supported.length + ' из ' +
+    Object.keys(features.syntax).length + ': ' + supported.join(', '));
+
+  /* ---------------------------------------------------------------- verdict */
+  var verdictSection = PS5JB.ui.section('Вывод', 'Автоматическая оценка пригодности движка');
+  var verdictBody = PS5JB.ui.table(verdictSection, ['вывод', 'что это значит', '']);
+  PS5JB.ui.row(verdictBody, features.WebAssembly ? 'ok' : 'warn', 'WebAssembly',
+    features.WebAssembly ? 'есть — доступны wasm-примитивы и JIT-компиляция wasm' : 'нет — wasm-векторы недоступны');
+  PS5JB.ui.row(verdictBody, features.SharedArrayBuffer ? 'ok' : 'warn', 'SharedArrayBuffer',
+    features.SharedArrayBuffer ? 'есть — возможны гонки/утечки через общую память' : 'нет (обычно из-за Spectre-митигаций)');
+  PS5JB.ui.row(verdictBody, supported.length >= 10 ? 'ok' : 'warn', 'уровень ES',
+    supported.length >= 12 ? 'ES2020+' : (supported.length >= 8 ? 'ES2017-2019' : 'ES5/ES6'));
+
+  PS5JB.mark('env', env);
+  PS5JB.mark('engine', engine);
+  PS5JB.mark('features', features);
+  PS5JB.mark('webgl', gl);
+  PS5JB.mark('supported_syntax', supported);
+  PS5JB.send('engine');
+
+  PS5JB.status('готово: ' + positives + '/' + total + ' API, ES-конструкций ' + supported.length);
+}());
+</script>
+</body>
+</html>

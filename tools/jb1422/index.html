@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<!--
+  jb1422 — джейлбрейк-пакет для PS5 14.22: userland R/W -> kernel R/W.
+  userland: CVE-2026-43720 (Canvas getContext reentrancy, WebKit bug 313175) — жив на 14.22
+            (TFujiwara v900/p553/v904, beacon-логи 2026-11-05).
+  kernel:   скелет поверх userland R/W + модуль tools/jb1422/kernel/ (recon-fw-exists).
+
+  Каждая стадия печатает: STAGE n: OK|FAIL|BLOCKED — текст {json}
+  Логи: <pre id="jb-log"> на экране + POST /beacon на сервер стенда.
+
+  Запуск на консоли: сервер отдаёт этот каталог (HTTPS), PS5 открывает index.html.
+  Запуск на ПК: тот же файл в WebKitGTK; ожидаемо STAGE 2 FAIL (локальный движок уже
+  с фиксом), STAGE H (harness self-test) OK.
+-->
+<meta charset="utf-8">
+<title>jb1422 — PS5 14.22 chain</title>
+<style>
+  body { font: 13px/1.4 monospace; background: #0b0f14; color: #d7e2ee; margin: 14px; }
+  h1 { font-size: 17px; color: #7fd; margin: 0 0 6px; }
+  .sub { color: #9ab; margin-bottom: 10px; }
+  .panel { border: 1px solid #2a3a4d; border-radius: 8px; padding: 10px; margin: 10px 0; background: #0e151d; }
+  button { background: #14406b; color: #eaf4ff; border: 1px solid #2f6ea8; border-radius: 6px;
+           padding: 8px 14px; margin: 3px 6px 3px 0; font: 13px monospace; cursor: pointer; }
+  button.primary { background: #0d6b3d; border-color: #19a35c; }
+  button.warn { background: #6b3d0d; border-color: #a87419; }
+  pre#jb-log { background: #000; border: 1px solid #223; padding: 10px; height: 62vh;
+               overflow: auto; white-space: pre-wrap; word-break: break-word; color: #b8ffb8; }
+  .kv { display: grid; grid-template-columns: 190px 1fr; gap: 2px 10px; color: #b9c9d9; }
+  .kv b { color: #cfe6ff; font-weight: normal; }
+  details { margin: 4px 0; }
+  code { color: #ffd27f; }
+</style>
+<h1>jb1422 — PS5 14.22: userland R/W → kernel R/W</h1>
+<div class="sub">Цепочка стадий с логом <code>STAGE n: OK/FAIL/BLOCKED</code>; userland — Canvas getContext UAF
+(CVE-2026-43720 / WebKit bug 313175), kernel — модуль <code>kernel/relapse1422.js</code> (подключается автоматически).</div>
+
+<div class="panel">
+  <div class="kv">
+    <b>target</b><span id="cfg-target">14.22</span>
+    <b>kernel offsets (Tier-1)</b><span id="cfg-offsets">kernelData 0x00CE0000, allproc 0x035B9EA0, security_flags 0x01A84064, rootvnode 0x03E3B510</span>
+    <b>local engine</b><span id="cfg-engine">…</span>
+    <b>server</b><span id="cfg-server">…</span>
+  </div>
+</div>
+
+<div class="panel">
+  <button class="primary" id="btn-run">▶ Run full chain</button>
+  <button id="btn-harness">🧪 Harness self-test (PC-safe)</button>
+  <button id="btn-candidates">☰ Kernel candidates</button>
+  <button id="btn-clear">Clear log</button>
+  <button id="btn-copy">Copy log</button>
+</div>
+
+<details class="panel">
+  <summary>Что считается успехом / где обычно рвётся</summary>
+  <ul>
+    <li><b>STAGE 2 OK</b> — движок уязвим (на 14.22 ожидается OK; на локальном WebKitGTK 2.52.5 — FAIL, это норма).</li>
+    <li><b>STAGE 3-5 OK</b> — same-type reclaim + alias R/W + self-test на известном объекте.</li>
+    <li><b>STAGE 9 BLOCKED</b> — нет утечки адреса (на 14.22 публично: zero-at-free, v911 grid SURV=0, p691 NOLEAK).</li>
+    <li><b>STAGE 11</b> — передача в kernel-модуль; если файла нет — BLOCKED с точным путём.</li>
+  </ul>
+</details>
+
+<pre id="jb-log">(log)</pre>
+
+<script src="js/util.js"></script>
+<script src="js/primitive.js"></script>
+<script src="js/syscalls.js"></script>
+<script src="js/kernel-candidates.js"></script>
+<script src="js/kernel-bridge.js"></script>
+<!-- Tier-1 оффсеты 14.22: window.KRW (нужен kernel/relapse1422.js) -->
+<script src="kernel/offsets/1422.js"></script>
+<script src="js/kernel-hook.js"></script>
+<script src="js/stages.js"></script>
+<script>
+(function () {
+  'use strict';
+  var logEl = document.getElementById('jb-log');
+  function banner() {
+    logEl.textContent = '';
+    var env = JBUtil.env();
+    document.getElementById('cfg-engine').textContent =
+      env.userAgent + ' | PS5=' + env.isPS5 + ' fw=' + env.firmware;
+    document.getElementById('cfg-server').textContent = location.origin;
+    document.getElementById('cfg-target').textContent = JB1422.CONFIG.firmwareTarget;
+    document.getElementById('cfg-offsets').textContent =
+      Object.keys(JB1422.CONFIG.kernelOffsets).map(function (k) {
+        var v = JB1422.CONFIG.kernelOffsets[k];
+        return k + ' ' + (Array.isArray(v) ? v.join('..') : v);
+      }).join(', ');
+  }
+  banner();
+
+  var running = false;
+  function run(fn) {
+    if (running) { JBUtil.log('already running'); return; }
+    running = true;
+    logEl.textContent = '';
+    Promise.resolve().then(fn).catch(function (e) {
+      JBUtil.log('UNCAUGHT ' + ((e && e.name) || 'Error') + ': ' + ((e && e.message) || String(e)));
+    }).then(function () { running = false; });
+  }
+
+  document.getElementById('btn-run').onclick = function () { run(JB1422.run); };
+  document.getElementById('btn-harness').onclick = function () { run(JB1422.runHarnessOnly); };
+  document.getElementById('btn-clear').onclick = function () { logEl.textContent = ''; };
+  document.getElementById('btn-copy').onclick = function () {
+    try {
+      if (navigator.clipboard) navigator.clipboard.writeText(logEl.textContent);
+      else {
+        var r = document.createRange(); r.selectNodeContents(logEl);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        document.execCommand('copy');
+      }
+      JBUtil.log('log copied to clipboard');
+    } catch (e) { JBUtil.log('copy failed: ' + e); }
+  };
+  document.getElementById('btn-candidates').onclick = function () {
+    run(function () {
+      JBUtil.log('===== kernel candidates (13.60 sysent numbers; 14.22 unverified) =====');
+      JBKernelCandidates.enumerate().forEach(function (c) {
+        JBUtil.log('CANDIDATE ' + c.id + ' — ' + c.surface + ' syscalls=' + JSON.stringify(c.syscalls));
+      });
+      var ctx = { chain: null, krw: null, config: JB1422.CONFIG, log: JBUtil.log };
+      var res = JBKernelCandidates.runAll(ctx, JBUtil.log);
+      JBUtil.stage('KB', res.ok ? 'OK' : 'BLOCKED',
+        'candidates total=' + res.total + ' ok=' + res.ok + ' blocked=' + res.blocked +
+        ' (все ждут code-exec/leak — см. recon/jb1422-design.md §6)');
+    });
+  };
+
+  if (/[?&]autorun=1/.test(location.search)) {
+    setTimeout(function () { run(JB1422.run); }, 300);
+  }
+})();
+</script>

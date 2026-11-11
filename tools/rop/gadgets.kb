@@ -1,0 +1,88 @@
+# gadgets.kb -- ROP gadget signature database
+# format:  id | category | score | pattern | expected asm | note
+#   pattern       hex bytes, "??" = wildcard
+#   expected asm  semicolon separated, Intel syntax, checked against the
+#                 disassembler; empty field = accept any decoding that consumes
+#                 exactly these bytes
+#   score         0..100, usefulness for building an exploit chain
+# `#` starts a comment line.
+
+# ---- argument setup (SysV: rdi rsi rdx rcx r8 r9) -------------------------
+pop_rdi_ret            | call_arg | 98 | 5f c3                | pop rdi; ret                     | 1st argument
+pop_rsi_ret            | call_arg | 97 | 5e c3                | pop rsi; ret                     | 2nd argument
+pop_rdx_ret            | call_arg | 96 | 5a c3                | pop rdx; ret                     | 3rd argument
+pop_rcx_ret            | call_arg | 90 | 59 c3                | pop rcx; ret                     | 4th argument
+pop_r8_ret             | call_arg | 88 | 41 58 c3             | pop r8; ret                      | 5th argument
+pop_r9_ret             | call_arg | 87 | 41 59 c3             | pop r9; ret                      | 6th argument
+pop_rax_ret            | call_arg | 94 | 58 c3                | pop rax; ret                     | syscall number / return value
+pop_rbx_ret            | call_arg | 80 | 5b c3                | pop rbx; ret                     | callee saved
+pop_rbp_ret            | call_arg | 78 | 5d c3                | pop rbp; ret                     | frame pointer
+pop_r12_ret            | call_arg | 74 | 41 5c c3             | pop r12; ret                     | callee saved
+pop_r13_ret            | call_arg | 72 | 41 5d c3             | pop r13; ret                     | callee saved
+pop_r14_ret            | call_arg | 72 | 41 5e c3             | pop r14; ret                     | callee saved
+pop_r15_ret            | call_arg | 72 | 41 5f c3             | pop r15; ret                     | callee saved
+pop_rdi_rsi_ret        | call_arg | 93 | 5f 5e c3             | pop rdi; pop rsi; ret            | two arguments in one gadget
+
+# ---- 64 bit memory writes ------------------------------------------------
+mov_q_rdi_rax_ret      | mem_write | 99 | 48 89 07 c3          | mov qword ptr [rdi], rax; ret    | write what-where
+mov_q_rdi_rsi_ret      | mem_write | 97 | 48 89 37 c3          | mov qword ptr [rdi], rsi; ret    |
+mov_q_rdi_rdx_ret      | mem_write | 90 | 48 89 17 c3          | mov qword ptr [rdi], rdx; ret    |
+mov_q_rdi_rcx_ret      | mem_write | 88 | 48 89 0f c3          | mov qword ptr [rdi], rcx; ret    |
+mov_q_rdi_rbx_ret      | mem_write | 84 | 48 89 1f c3          | mov qword ptr [rdi], rbx; ret    |
+mov_q_rsi_rax_ret      | mem_write | 92 | 48 89 06 c3          | mov qword ptr [rsi], rax; ret    |
+mov_q_rdx_rax_ret      | mem_write | 90 | 48 89 02 c3          | mov qword ptr [rdx], rax; ret    |
+mov_q_rcx_rax_ret      | mem_write | 90 | 48 89 01 c3          | mov qword ptr [rcx], rax; ret    |
+mov_q_rax_rdi_ret      | mem_write | 95 | 48 89 38 c3          | mov qword ptr [rax], rdi; ret    |
+mov_q_rax_rsi_ret      | mem_write | 93 | 48 89 30 c3          | mov qword ptr [rax], rsi; ret    |
+mov_q_rax_rdx_ret      | mem_write | 91 | 48 89 10 c3          | mov qword ptr [rax], rdx; ret    |
+mov_q_rax_rbx_ret      | mem_write | 89 | 48 89 18 c3          | mov qword ptr [rax], rbx; ret    |
+mov_q_rax_rcx_ret      | mem_write | 89 | 48 89 08 c3          | mov qword ptr [rax], rcx; ret    |
+mov_q_rdi_plus8_rax_ret| mem_write | 85 | 48 89 47 08 c3       | mov qword ptr [rdi + 8], rax; ret | adjacent field write
+mov_d_rdi_eax_ret      | mem_write | 86 | 89 07 c3             | mov dword ptr [rdi], eax; ret    | 32 bit write
+mov_d_rax_edi_ret      | mem_write | 85 | 89 38 c3             | mov dword ptr [rax], edi; ret    | 32 bit write
+mov_w_rax_ax_ret       | mem_write | 70 | 66 89 00 c3          | mov word ptr [rax], ax; ret      | 16 bit write
+mov_b_rax_al_ret       | mem_write | 70 | 88 00 c3             | mov byte ptr [rax], al; ret      | 8 bit write
+
+# ---- memory reads (leak / pointer chase) ---------------------------------
+mov_rax_ptr_rdi_ret    | mem_read  | 96 | 48 8b 07 c3          | mov rax, qword ptr [rdi]; ret    | leak / follow pointer
+mov_rax_ptr_rsi_ret    | mem_read  | 92 | 48 8b 06 c3          | mov rax, qword ptr [rsi]; ret    |
+mov_rax_ptr_rbx_ret    | mem_read  | 90 | 48 8b 03 c3          | mov rax, qword ptr [rbx]; ret    |
+mov_rax_ptr_rax_ret    | mem_read  | 90 | 48 8b 00 c3          | mov rax, qword ptr [rax]; ret    |
+mov_rax_ptr_rdi8_ret   | mem_read  | 88 | 48 8b 47 08 c3       | mov rax, qword ptr [rdi + 8]; ret|
+mov_rax_ptr_rax8_ret   | mem_read  | 86 | 48 8b 40 08 c3       | mov rax, qword ptr [rax + 8]; ret|
+
+# ---- register shuffling --------------------------------------------------
+mov_rdi_rax_ret        | reg_move  | 94 | 48 89 c7 c3          | mov rdi, rax; ret                | promote return value to argument
+mov_rsi_rax_ret        | reg_move  | 90 | 48 89 c6 c3          | mov rsi, rax; ret                |
+mov_rdx_rax_ret        | reg_move  | 90 | 48 89 c2 c3          | mov rdx, rax; ret                |
+mov_rdi_eax_ret        | reg_move  | 82 | 89 c7 c3             | mov edi, eax; ret                |
+xchg_rdi_rax_ret       | reg_move  | 84 | 48 97 c3             | xchg rdi, rax; ret               |
+xchg_rdx_rax_ret       | reg_move  | 80 | 48 92 c3             | xchg rdx, rax; ret               |
+zero_rax_ret           | arith     | 88 | 48 31 c0 c3          | xor rax, rax; ret                | zero a register
+zero_edi_ret           | arith     | 84 | 31 ff c3             | xor edi, edi; ret                |
+inc_rax_ret            | arith     | 66 | 48 ff c0 c3          | inc rax; ret                     |
+add_rax_1_ret          | arith     | 62 | 48 83 c0 01 c3       | add rax, 1; ret                  |
+neg_rax_ret            | arith     | 58 | 48 f7 d8 c3          | neg rax; ret                     |
+
+# ---- stack pivots --------------------------------------------------------
+leave_ret              | stack_pivot | 97 | c9 c3              | leave; ret                       | classic frame pivot
+pop_rsp_ret            | stack_pivot | 96 | 5c c3              | pop rsp; ret                     | absolute pivot
+xchg_rsp_rax_ret       | stack_pivot | 95 | 48 94 c3           | xchg rsp, rax; ret               | pivot through rax
+xchg_esp_eax_ret       | stack_pivot | 70 | 94 c3              | xchg esp, eax; ret               | 32 bit truncating
+jmp_rsp                | stack_pivot | 92 | ff e4              | jmp rsp                          | jump into the stack
+call_rsp               | stack_pivot | 80 | ff d4              | call rsp                         |
+add_rsp_8_ret          | stack_pivot | 88 | 48 83 c4 08 c3     | add rsp, 8; ret                  | skip stack slot
+add_rsp_10_ret         | stack_pivot | 88 | 48 83 c4 10 c3     | add rsp, 0x10; ret               |
+add_rsp_18_ret         | stack_pivot | 86 | 48 83 c4 18 c3     | add rsp, 0x18; ret               |
+add_rsp_20_ret         | stack_pivot | 86 | 48 83 c4 20 c3     | add rsp, 0x20; ret               |
+add_rsp_28_ret         | stack_pivot | 84 | 48 83 c4 28 c3     | add rsp, 0x28; ret               |
+add_rsp_38_ret         | stack_pivot | 84 | 48 83 c4 38 c3     | add rsp, 0x38; ret               |
+add_rsp_100_ret        | stack_pivot | 82 | 48 81 c4 00 01 00 00 c3 | add rsp, 0x100; ret        |
+add_rsp_1000_ret       | stack_pivot | 70 | 48 81 c4 00 10 00 00 c3 | add rsp, 0x1000; ret       |
+
+# ---- dispatch / indirect control flow ------------------------------------
+jmp_rax                | dispatch  | 84 | ff e0              | jmp rax                          |
+jmp_ptr_rax            | dispatch  | 82 | ff 20              | jmp qword ptr [rax]              | vtable style dispatch
+call_rax_ret           | dispatch  | 80 | ff d0 c3           | call rax; ret                    | call through a controlled register
+call_ptr_rdi           | dispatch  | 84 | ff 17              | call qword ptr [rdi]             |
+syscall_ret            | dispatch  | 90 | 0f 05 c3           | syscall; ret                     | direct syscall trampoline

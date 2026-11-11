@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — JIT</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only. */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('Доступность JIT', 'WebAssembly, скорость скомпилированного цикла и прогрев — без эксплойта');
+
+  var util = PS5JB.util;
+  var results = {
+    wasm: {},
+    loops: [],
+    warmup: [],
+    eval: {},
+    verdict: {}
+  };
+
+  var main = document.getElementById('main');
+  var wasmSection = PS5JB.ui.section('WebAssembly', 'WASM — отдельный JIT-контур; его наличие расширяет поверхность атаки');
+  var wasmBody = PS5JB.ui.table(wasmSection, ['проба', 'значение', '']);
+  var loopSection = PS5JB.ui.section('Скорость JS-цикла', 'Один и тот же целочисленный цикл, три прогона подряд: рост Mops/s = прогрев JIT');
+  var loopBody = PS5JB.ui.table(loopSection, ['прогон', 'итераций', 'Mops/s']);
+  var verdictSection = PS5JB.ui.section('Вывод', 'Эвристика, а не доказательство: точный статус JIT снаружи не виден');
+  var verdictBody = PS5JB.ui.table(verdictSection, ['признак', 'значение', '']);
+
+  /* Minimal wasm module: (module (func (export "add") (param i32 i32) (result i32)
+     local.get 0 local.get 1 i32.add)). Hand-assembled and validated by
+     WebAssembly.validate() before use, so a typo cannot silently pass. */
+  function wasmAddModule() {
+    return new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,          /* magic + version */
+      0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,    /* type: (i32,i32)->i32 */
+      0x03, 0x02, 0x01, 0x00,                                  /* function: 1 func, type 0 */
+      0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,    /* export "add" func 0 */
+      0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b /* code */
+    ]);
+  }
+
+  function benchInt(iters) {
+    var started = util.now();
+    var acc = 0;
+    for (var i = 0; i < iters; i++) {
+      acc = (acc + i) | 0;
+      acc = (acc ^ (i << 1)) & 0x7fffffff;
+    }
+    var elapsed = util.now() - started;
+    return { ms: elapsed, acc: acc, mops: elapsed > 0 ? (iters / elapsed) / 1000 : 0 };
+  }
+
+  function benchFloat(iters) {
+    var started = util.now();
+    var acc = 1.0;
+    for (var i = 1; i <= iters; i++) {
+      acc = acc * 1.0000001 + (i % 7) * 0.5;
+    }
+    var elapsed = util.now() - started;
+    return { ms: elapsed, acc: acc, mops: elapsed > 0 ? (iters / elapsed) / 1000 : 0 };
+  }
+
+  /* ------------------------------------------------------------------ wasm */
+  function wasmChecks(next) {
+    var bytes = wasmAddModule();
+    results.wasm.bytes = bytes.length;
+    results.wasm.available = (typeof WebAssembly === 'object');
+    if (!results.wasm.available) {
+      PS5JB.ui.row(wasmBody, 'fail', 'WebAssembly', 'объект отсутствует');
+      next();
+      return;
+    }
+    PS5JB.ui.row(wasmBody, 'ok', 'WebAssembly', 'есть');
+    try {
+      results.wasm.valid = WebAssembly.validate(bytes);
+      PS5JB.ui.row(wasmBody, results.wasm.valid ? 'ok' : 'fail', 'validate(41 байт)', String(results.wasm.valid));
+    } catch (err) {
+      results.wasm.valid = false;
+      PS5JB.ui.row(wasmBody, 'fail', 'validate', String(err));
+      next();
+      return;
+    }
+    var started = util.now();
+    try {
+      var module = new WebAssembly.Module(bytes);
+      var instance = new WebAssembly.Instance(module, {});
+      var compileMs = util.now() - started;
+      results.wasm.compile_ms = util.round(compileMs, 2);
+      PS5JB.ui.row(wasmBody, 'ok', 'Module+Instance', util.ms(compileMs));
+
+      var add = instance.exports.add;
+      var callIters = 2000000;
+      started = util.now();
+      var sum = 0;
+      for (var i = 0; i < callIters; i++) {
+        sum = add(i, 1);
+      }
+      var callMs = util.now() - started;
+      results.wasm.call_ms = util.round(callMs, 1);
+      results.wasm.call_mops = util.round((callIters / callMs) / 1000, 2);
+      results.wasm.sum = sum;
+      PS5JB.ui.row(wasmBody, sum === callIters ? 'ok' : 'fail', '2M вызовов add',
+        util.ms(callMs) + ' = ' + results.wasm.call_mops + ' Mops/s, сумма=' + sum);
+    } catch (err) {
+      results.wasm.instance_error = String(err);
+      PS5JB.ui.row(wasmBody, 'fail', 'instantiate', String(err));
+    }
+
+    /* Memory growth is the cheapest wasm-side heap primitive. */
+    try {
+      var memory = new WebAssembly.Memory({ initial: 1, maximum: 256 });
+      var before = memory.buffer.byteLength;
+      memory.grow(16);
+      var after = memory.buffer.byteLength;
+      results.wasm.memory = { before: before, after: after, pages_grown: 16 };
+      PS5JB.ui.row(wasmBody, after > before ? 'ok' : 'warn', 'Memory.grow(16)',
+        util.bytes(before) + ' -> ' + util.bytes(after));
+    } catch (err) {
+      results.wasm.memory_error = String(err);
+      PS5JB.ui.row(wasmBody, 'warn', 'Memory.grow(16)', String(err));
+    }
+
+    results.wasm.streaming = (typeof WebAssembly.instantiateStreaming === 'function');
+    results.wasm.compile_streaming = (typeof WebAssembly.compileStreaming === 'function');
+    PS5JB.ui.row(wasmBody, results.wasm.streaming ? 'ok' : 'warn', 'instantiateStreaming',
+      String(results.wasm.streaming));
+    next();
+  }
+
+  /* ----------------------------------------------------------------- loops */
+  function loopChecks(next) {
+    /* Sizes grow so that the first runs are cold-cache/cold-JIT and the last are warm. */
+    var sizes = [200000, 2000000, 20000000];
+    var index = 0;
+    function runOne() {
+      if (index >= sizes.length) {
+        var last = results.loops[results.loops.length - 1];
+        var float = benchFloat(5000000);
+        results.float = { ms: util.round(float.ms, 1), mops: util.round(float.mops, 2) };
+        PS5JB.ui.row(loopBody, 'float 5M', '5000000',
+          util.ms(float.ms) + ' = ' + util.round(float.mops, 2) + ' Mops/s');
+        next();
+        return;
+      }
+      var iters = sizes[index++];
+      var bench = benchInt(iters);
+      results.loops.push({ iters: iters, ms: util.round(bench.ms, 1), mops: util.round(bench.mops, 2) });
+      PS5JB.ui.row(loopBody, bench.ms > 0 ? 'ok' : 'warn', '#' + index, String(iters),
+        util.ms(bench.ms) + ' = ' + util.round(bench.mops, 2) + ' Mops/s');
+      setTimeout(runOne, 10);
+    }
+    runOne();
+  }
+
+  /* ------------------------------------------------------------------ eval */
+  function evalChecks(next) {
+    results.eval.newFunction = util.syntaxOk('return 1 + 1;');
+    results.eval.eval = util.tryEval('1 + 1').ok;
+    var natives = util.tryEval('%GetOptimizationStatus(function(){})');
+    results.eval.natives = natives.ok ? 'доступны' : natives.error;
+    PS5JB.ui.row(verdictBody, natives.ok ? 'ok' : 'warn', '%GetOptimizationStatus',
+      natives.ok ? 'доступен (V8 natives!)' : 'нет: ' + natives.error);
+    var last = results.loops.length ? results.loops[results.loops.length - 1] : null;
+    var first = results.loops.length ? results.loops[0] : null;
+    var speedup = first && last && first.ms > 0 && last.ms > 0
+      ? (last.mops / first.mops) : null;
+    if (speedup) {
+      results.verdict.speedup = util.round(speedup, 2);
+      PS5JB.ui.row(verdictBody, speedup > 1.5 ? 'ok' : 'warn', 'ускорение после прогрева',
+        util.round(speedup, 2) + '× (последний прогон быстрее первого)');
+    }
+    var mops = last ? last.mops : 0;
+    var label;
+    var status;
+    if (mops >= 50) {
+      label = 'похоже, JIT включён (JSC baseline/DFG или V8)';
+      status = 'ok';
+    } else if (mops >= 10) {
+      label = 'JIT вероятен, но медленный: возможно, только baseline-тир';
+      status = 'warn';
+    } else {
+      label = 'похоже на интерпретатор или очень медленный CPU';
+      status = 'fail';
+    }
+    results.verdict.jit = label;
+    results.verdict.mops = mops;
+    PS5JB.ui.row(verdictBody, status, 'итог по JIT', label + ' (' + mops + ' Mops/s)');
+    PS5JB.ui.row(verdictBody, results.wasm.valid ? 'ok' : 'warn', 'wasm-контур',
+      results.wasm.valid ? 'валиден: ' + results.wasm.call_mops + ' Mops/s' : 'нет');
+    next();
+  }
+
+  PS5JB.sequence([wasmChecks, loopChecks, evalChecks], function () {
+    PS5JB.mark('jit', results);
+    PS5JB.send('jit');
+    PS5JB.status('готово: ' + results.verdict.jit);
+  });
+
+  PS5JB.send('jit', { event: 'started' });
+}());
+</script>
+</body>
+</html>

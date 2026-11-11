@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!--
+  diag-dictionary-getters.html — вспомогательная страница (не для консоли):
+  показывает, какие члены IDL-словаря getContext() движок реально читает
+  (вызывает JS-геттеры). На WebKitGTK 2.52.5: для 2d читается desynchronized и
+  willReadFrequently, но НЕ alpha (в CanvasRenderingContext2DSettings.idl член alpha
+  закомментирован: // FIXME: Add support for 'alpha'); для bitmaprenderer/webgl
+  читается alpha. Отсюда выбор геттеров в p1.
+-->
+<meta charset="utf-8"><pre id="out">run</pre><script>
+var log=[];
+function test(outerType, key){
+  var c=document.createElement('canvas'); c.width=1; c.height=1;
+  var fired=0, inner=null, outer=null;
+  var o={}; Object.defineProperty(o,key,{get:function(){fired++; if(fired===1 && typeof c.getContext==='function'){try{inner=c.getContext('2d');}catch(e){}} return true;}});
+  try{ outer=c.getContext(outerType,o); }catch(e){ log.push(outerType+'/'+key+' THREW '+e.name); return; }
+  log.push(outerType+'/'+key+' fired='+fired+' inner='+(inner?inner.constructor.name:'null')+' outer='+(outer?outer.constructor.name:'null'));
+}
+['2d','bitmaprenderer','webgl'].forEach(function(t){ ['alpha','desynchronized','willReadFrequently','colorSpace'].forEach(function(k){ test(t,k); }); });
+document.getElementById('out').textContent='DIAG='+JSON.stringify(log);
+</script>

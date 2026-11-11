@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — заготовка цепочки</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only.
+ *
+ * Chain scaffold: a real, runnable stage runner with explicit extension points.
+ * It does NOT pretend to exploit anything. Stages that need a memory-corruption
+ * primitive are reported as "blocked" together with the exact API a future
+ * primitive has to implement.
+ */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('Заготовка цепочки', 'Стадии, примитивы и хуки: сюда подставляется реальная цепочка, ' +
+    'не меняя остальной стенд');
+
+  var util = PS5JB.util;
+
+  /* ------------------------------------------------------------ chain core */
+  function createChain() {
+    var chain = {
+      stages: [],
+      primitives: {},
+      hooks: { beforeStage: [], afterStage: [], onReport: [] },
+      results: [],
+      running: false,
+      defaultTimeoutMs: 15000,
+
+      addHook: function (name, fn) {
+        if (!chain.hooks[name]) {
+          throw new Error('unknown hook: ' + name + ' (expected beforeStage|afterStage|onReport)');
+        }
+        chain.hooks[name].push(fn);
+        return chain;
+      },
+
+      emit: function (name, payload) {
+        var list = chain.hooks[name] || [];
+        var fired = 0;
+        for (var i = 0; i < list.length; i++) {
+          try {
+            list[i](payload);
+            fired++;
+          } catch (err) {
+            PS5JB.errors.push('hook ' + name + '[' + i + ']: ' + err);
+          }
+        }
+        return fired;
+      },
+
+      addStage: function (definition) {
+        if (!definition || !definition.name || typeof definition.run !== 'function') {
+          throw new Error('stage needs {name, run(ctx, done)}');
+        }
+        chain.stages.push(definition);
+        return chain;
+      },
+
+      setPrimitive: function (name, fn) {
+        if (typeof fn !== 'function') {
+          throw new Error('primitive must be a function: ' + name);
+        }
+        chain.primitives[name] = fn;
+        return chain;
+      },
+
+      getPrimitive: function (name) {
+        return chain.primitives[name] || null;
+      },
+
+      reset: function () {
+        chain.results = [];
+        chain.running = false;
+      },
+
+      run: function (done) {
+        if (chain.running) {
+          return false;
+        }
+        chain.running = true;
+        chain.results = [];
+
+        var index = 0;
+
+        function next() {
+          if (index >= chain.stages.length) {
+            chain.running = false;
+            chain.emit('onReport', chain.results);
+            if (done) {
+              done(chain.results);
+            }
+            return;
+          }
+          var stage = chain.stages[index++];
+          var entry = {
+            name: stage.name,
+            status: 'running',
+            started_ms: util.round(util.now(), 1),
+            detail: '',
+            data: null
+          };
+          var settled = false;
+          var timer = null;
+
+          function settle(status, detail, data) {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (timer) {
+              clearTimeout(timer);
+            }
+            entry.status = status;
+            entry.detail = detail || '';
+            entry.data = data === undefined ? null : data;
+            entry.ms = util.round(util.now() - entry.started_ms, 1);
+            chain.results.push(entry);
+            chain.emit('afterStage', entry);
+            setTimeout(next, 0);
+          }
+
+          chain.emit('beforeStage', stage);
+
+          var missing = [];
+          for (var i = 0; i < (stage.requires || []).length; i++) {
+            if (!chain.getPrimitive(stage.requires[i])) {
+              missing.push(stage.requires[i]);
+            }
+          }
+          if (missing.length) {
+            settle('blocked', 'нет примитива: ' + missing.join(', ') +
+              ' — зарегистрируйте PS5JB.chain.setPrimitive("<имя>", fn)');
+            return;
+          }
+
+          timer = setTimeout(function () {
+            settle('timeout', 'стадия не ответила за ' + (stage.timeout_ms || chain.defaultTimeoutMs) + ' мс');
+          }, stage.timeout_ms || chain.defaultTimeoutMs);
+
+          try {
+            stage.run({
+              primitives: chain.primitives,
+              mark: function (key, value) {
+                entry.data = entry.data || {};
+                entry.data[key] = value;
+                return value;
+              },
+              util: util
+            }, settle);
+          } catch (err) {
+            settle('error', String(err && err.stack ? err.stack : err));
+          }
+        }
+
+        next();
+        return true;
+      }
+    };
+    return chain;
+  }
+
+  var chain = PS5JB.chain = createChain();
+
+  /* ------------------------------------------------------------- rendering */
+  var section = PS5JB.ui.section('Стадии', 'Порядок выполнения фиксирован; стадия без примитива помечается blocked');
+  var body = PS5JB.ui.table(section, ['статус', 'стадия', 'детали']);
+  var summarySection = PS5JB.ui.section('Сводка', 'Итог по цепочке');
+  var summaryBody = PS5JB.ui.table(summarySection, ['итог', 'значение', '']);
+
+  var controls = PS5JB.ui.h('div');
+  controls.appendChild(PS5JB.button('Выполнить цепочку', runChain));
+  var sendButton = PS5JB.button('Отправить в лог', function () { sendReport(); });
+  sendButton.className = 'action secondary';
+  controls.appendChild(sendButton);
+  section.appendChild(controls);
+
+  function render(entry) {
+    var status = entry.status;
+    var detail = entry.detail;
+    if (entry.data && entry.data.summary) {
+      detail += ' | ' + entry.data.summary;
+    }
+    PS5JB.ui.row(body, status === 'ok' ? 'ok' : (status === 'blocked' ? 'warn' : 'fail'),
+      entry.name, status + ': ' + detail);
+  }
+
+  /* --------------------------------------------------------------- stages */
+  chain.addStage({
+    name: '01-env',
+    run: function (ctx, done) {
+      var engine = PS5JB.engineGuess();
+      var features = PS5JB.features();
+      var info = {
+        engine: engine,
+        wasm: features.WebAssembly === true,
+        sab: features.SharedArrayBuffer === true,
+        cores: navigator.hardwareConcurrency || null,
+        heapLimit: (window.performance && performance.memory) ? performance.memory.jsHeapSizeLimit : null
+      };
+      ctx.mark('env', info);
+      done('ok', (engine.guess || 'engine?') + ', wasm=' + info.wasm + ', SAB=' + info.sab +
+        ', cores=' + info.cores);
+    }
+  });
+
+  chain.addStage({
+    name: '02-heap-spray',
+    run: function (ctx, done) {
+      var COUNT = 96;
+      var SIZE = 1024 * 1024;
+      var started = util.now();
+      var buffers = [];
+      var verified = 0;
+      try {
+        for (var i = 0; i < COUNT; i++) {
+          var buffer = new ArrayBuffer(SIZE);
+          var view = new Uint8Array(buffer);
+          /* Write a recognisable pattern; a real spray would shape specific objects. */
+          for (var offset = 0; offset < SIZE; offset += 4096) {
+            view[offset] = 0x41;
+          }
+          if (view[0] === 0x41 && view[SIZE - 1] === 0x41) {
+            verified++;
+          }
+          buffers.push({ buffer: buffer, view: view, freed: false });
+        }
+      } catch (err) {
+        done('error', 'аллокация прервана на ' + buffers.length + ': ' + err);
+        return;
+      }
+      ctx.heapSpray = buffers;
+      var bytes = buffers.length * SIZE;
+      ctx.mark('spray', { blocks: buffers.length, bytes: bytes, verified: verified });
+      done('ok', buffers.length + '×1 MiB (' + util.bytes(bytes) + '), проверено ' + verified +
+        ', ' + util.ms(util.now() - started));
+    }
+  });
+
+  chain.addStage({
+    name: '03-address-leak',
+    run: function (ctx, done) {
+      var surfaces = {};
+      /* Every surface is actually evaluated; the report says what it gives. */
+      surfaces.errorStack = String(new Error('leak-check').stack || '');
+      var hexes = surfaces.errorStack.match(/0x[0-9a-fA-F]{6,}/g) || [];
+      surfaces.errorStackPointers = hexes.length;
+
+      var nativeText = Function.prototype.toString.call(Math.max);
+      surfaces.nativeToString = nativeText.slice(0, 40);
+      surfaces.nativeHasPointer = /0x[0-9a-fA-F]{6,}/.test(nativeText);
+
+      var natives = util.tryEval('%DebugPrint');
+      surfaces.nativesAvailable = natives.ok ? 'yes' : natives.error;
+
+      surfaces.internals = typeof window.internals === 'object';
+      surfaces.vm = typeof window.$vm === 'object';
+
+      try {
+        var gl = document.createElement('canvas').getContext('webgl');
+        surfaces.webglParamType = gl ? typeof gl.getParameter(gl.VERSION) : 'no-webgl';
+      } catch (err) {
+        surfaces.webglParamType = 'error: ' + err;
+      }
+
+      var leaked = surfaces.errorStackPointers + (surfaces.nativeHasPointer ? 1 : 0);
+      ctx.mark('leak', surfaces);
+      if (leaked > 0) {
+        done('ok', 'найдены адреса в тексте: stack=' + surfaces.errorStackPointers +
+          ', native=' + surfaces.nativeHasPointer);
+      } else {
+        done('blocked', 'ни одна из 6 проверенных поверхностей не отдаёт указатель: ' +
+          'стек без адресов, natives=' + surfaces.nativesAvailable +
+          ' — нужен баг чтения памяти, а не трюк с JS');
+      }
+    }
+  });
+
+  chain.addStage({
+    name: '04-arb-rw',
+    requires: ['arbRw'],
+    run: function (ctx, done) {
+      /* Contract for the primitive that must be registered:
+         fn(op, address, lengthOrBytes) -> Uint8Array | number | boolean
+         op: 'read' | 'write' */
+      var result = ctx.primitives.arbRw('read', 0, 8);
+      ctx.mark('arbRwProbe', String(result));
+      done('ok', 'примитив arbRw зарегистрирован и вызван для чтения 8 байт по адресу 0');
+    }
+  });
+
+  chain.addStage({
+    name: '05-code-exec',
+    requires: ['codeExec'],
+    run: function (ctx, done) {
+      var result = ctx.primitives.codeExec('return 1 + 1;');
+      ctx.mark('codeExecProbe', String(result));
+      done('ok', 'примитив codeExec вызван, результат=' + result);
+    }
+  });
+
+  chain.addStage({
+    name: '06-persist',
+    requires: ['persist'],
+    run: function (ctx, done) {
+      var result = ctx.primitives.persist('probe');
+      ctx.mark('persistProbe', String(result));
+      done('ok', 'примитив persist вызван: ' + result);
+    }
+  });
+
+  chain.addStage({
+    name: '07-hooks-selftest',
+    run: function (ctx, done) {
+      /* Proves the extension points are live on an independent instance:
+         register a primitive, add hooks, add a stage, run it, verify, clean up. */
+      var probe = createChain();
+      var seenBefore = 0;
+      var seenAfter = 0;
+      var seenReport = 0;
+      var primitiveResult = null;
+
+      probe.addHook('beforeStage', function () { seenBefore++; });
+      probe.addHook('afterStage', function (entry) {
+        if (entry && entry.name === '_selftest-stage') {
+          seenAfter++;
+        }
+      });
+      probe.addHook('onReport', function () { seenReport++; });
+
+      probe.setPrimitive('_selftest', function () {
+        primitiveResult = 'primitive-ok';
+        return primitiveResult;
+      });
+
+      probe.addStage({
+        name: '_selftest-stage',
+        requires: ['_selftest'],
+        run: function (inner, finish) {
+          finish('ok', 'примитив вернул: ' + inner.primitives._selftest());
+        }
+      });
+
+      probe.run(function (results) {
+        var ok = results.length === 1 && results[0].status === 'ok' &&
+          seenBefore === 1 && seenAfter === 1 && seenReport === 1 &&
+          primitiveResult === 'primitive-ok';
+        ctx.mark('hooks', {
+          beforeStage: seenBefore,
+          afterStage: seenAfter,
+          onReport: seenReport,
+          primitive: primitiveResult,
+          stages: results.length,
+          stage_status: results[0] ? results[0].status : 'none'
+        });
+        done(ok ? 'ok' : 'error',
+          'хуки: beforeStage=' + seenBefore + ', afterStage=' + seenAfter +
+          ', onReport=' + seenReport + '; примитив=' + primitiveResult +
+          '; стадия=' + (results[0] ? results[0].status : 'none'));
+      });
+    }
+  });
+
+  /* ------------------------------------------------------------- reporting */
+  function runChain() {
+    body.innerHTML = '';
+    chain.reset();
+    PS5JB.status('выполняю цепочку…');
+    chain.run(function (results) {
+      var okCount = 0;
+      var blocked = 0;
+      for (var i = 0; i < results.length; i++) {
+        render(results[i]);
+        if (results[i].status === 'ok') { okCount++; }
+        if (results[i].status === 'blocked') { blocked++; }
+      }
+      PS5JB.mark('chain', results);
+      PS5JB.ui.row(summaryBody, okCount > 0 ? 'ok' : 'fail', 'стадий ok', String(okCount + ' из ' + results.length));
+      PS5JB.ui.row(summaryBody, 'info', 'заблокировано', String(blocked));
+      PS5JB.status('готово: ' + okCount + '/' + results.length + ' стадий, blocked=' + blocked);
+      sendReport();
+    });
+  }
+
+  function sendReport() {
+    PS5JB.report.send('chain', {
+      stage_count: chain.results.length,
+      stages: chain.results,
+      primitives: Object.keys(chain.primitives)
+    }, { href: location.href }, function (status) {
+      PS5JB.mark('chain_beacon_status', status);
+    });
+  }
+
+  /* ------------------------------------------------------------- extension */
+  var extSection = PS5JB.ui.section('Точки расширения', 'Реальная цепочка подключается этими вызовами; менять serve.py или probe.js не нужно');
+  var sample = [
+    '/* 1. primitive: the memory-corruption layer */',
+    'PS5JB.chain.setPrimitive("arbRw", function (op, address, arg) {',
+    '  /* op "read"  -> return Uint8Array of arg bytes',
+    '     op "write" -> arg is Uint8Array, return true */',
+    '});',
+    '',
+    '/* 2. stage: runs automatically after 03-address-leak */',
+    'PS5JB.chain.addStage({',
+    '  name: "04b-corrupt-object",',
+    '  requires: ["arbRw"],',
+    '  run: function (ctx, done) {',
+    '    var bytes = ctx.primitives.arbRw("read", 0xdeadbeef, 16);',
+    '    done("ok", "read " + bytes.length);',
+    '  }',
+    '});',
+    '',
+    '/* 3. hooks: observe every stage without touching the runner */',
+    'PS5JB.chain.addHook("beforeStage", function (stage) { console.log(stage.name); });',
+    'PS5JB.chain.addHook("afterStage",  function (entry) { /* entry.status, entry.ms */ });',
+    'PS5JB.chain.addHook("onReport",   function (results) { /* full chain result */ });',
+    '',
+    '/* 4. run */',
+    'PS5JB.chain.run(function (results) { /* results[i].status */ });'
+  ].join('\n');
+  extSection.appendChild(PS5JB.ui.h('pre', null, sample));
+  PS5JB.ui.note(extSection, 'Стадии 04–06 требуют примитивов: без них они сообщают blocked и имя ' +
+    'отсутствующего примитива. Это не заглушка, а проверяемый контракт: как только примитив зарегистрирован, ' +
+    'стадия выполняется и вызывает его. Самотест 07 проверяет, что хуки и регистрация примитивов работают.');
+
+  runChain();
+}());
+</script>
+</body>
+</html>

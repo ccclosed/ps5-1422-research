@@ -1,0 +1,46 @@
+{
+  "note": "Калибровка эпох: requiredSystemSoftwareVersion и sdkVersion из sce_sys/param.json. Декодер — recon/module-era-decoding.md (KytyPS5).",
+  "points": [
+    {
+      "game": "Cyberpunk 2077 PPSA04029 v02.120",
+      "source": "games/cyberpunk/PPSA04029.exfat (локальный образ, прочитан local_exfat_param.py)",
+      "param_json": {
+        "contentVersion": "02.120.000",
+        "masterVersion": "01.00",
+        "originContentVersion": "01.000.000",
+        "targetContentVersion": "02.110.000",
+        "sdkVersion": "0x0400000000000000",
+        "requiredSystemSoftwareVersion": "0x0860000000000000",
+        "pubtools_toolVersion": "2.35"
+      },
+      "sdk": "04.00",
+      "required_fw": "08.60",
+      "libc_build": "J01625764",
+      "libc_size": 1352554
+    },
+    {
+      "game": "Code Violet PPSA26528 v01.028",
+      "source": "fw/game-modules/code-violet-ppsa26528-v01028/param.json",
+      "param_json": {
+        "contentVersion": "01.000.028",
+        "masterVersion": "01.00",
+        "originContentVersion": "01.000.000",
+        "targetContentVersion": "01.000.027",
+        "sdkVersion": "0x1100000000000000",
+        "requiredSystemSoftwareVersion": "0x1270000000000000",
+        "pubtools_toolVersion": "3.13"
+      },
+      "sdk": "11.00",
+      "required_fw": "12.70",
+      "libc_build": "J03547016",
+      "libc_size": 1911850
+    }
+  ],
+  "observations": [
+    "Подпись 'SDK 8.60' для Cyberpunk (из постановки задачи) неверна по сути: 8.60 — это REQUIRED FIRMWARE, а SDK там 04.00.",
+    "Между эпохами FW вырос на 4.10 (08.60 -> 12.70), а SDK — на 7.00 (04.00 -> 11.00). SDK-номер растёт быстрее FW.",
+    "build-id libc растёт монотонно: J01625764 -> J03547016.",
+    "pubtools 2.35 -> 3.13.",
+    "Третьей точки (FW 13.x/14.x) нет: дампов с requiredSystemSoftwareVersion >= 0x13000... публично не найдено."
+  ]
+}

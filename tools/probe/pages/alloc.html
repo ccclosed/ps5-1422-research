@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps5jb probe — аллокации</title>
+<link rel="stylesheet" href="/assets/probe.css">
+</head>
+<body>
+<script src="/assets/probe.js"></script>
+<script>
+/* ES5 only. Allocation probes must not themselves depend on modern syntax. */
+(function () {
+  'use strict';
+
+  PS5JB.initPage('Тесты аллокаций', 'Сколько памяти реально даёт браузер и как он ведёт себя при исчерпании');
+
+  var main = document.getElementById('main');
+  var util = PS5JB.util;
+
+  var SIZES_MIB = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512];
+  var CHUNK_MIB = 16;
+  var CHUNK_LIMIT = 40;          /* hard stop: 640 MiB total, keeps the page alive */
+  var STRING_LIMIT = 1 << 26;    /* 64 MiB of UTF-16 characters */
+
+  var results = {
+    sizes: [],
+    contiguous_max_bytes: 0,
+    chunks: [],
+    chunks_total_bytes: 0,
+    fragmentation: null,
+    strings: null,
+    heap: null,
+    errors: []
+  };
+  var live = [];
+  var t0 = util.now();
+
+  var section = PS5JB.ui.section('Ход теста', 'Каждый шаг идёт в отдельном таймере, чтобы движок успевал отдать память GC. ' +
+    'Страница держит выделенное до конца теста — так виден реальный потолок, а не кэш.');
+  var body = PS5JB.ui.table(section, ['проба', 'шаг', 'результат']);
+  var summarySection = PS5JB.ui.section('Итоги', 'Сводка по завершении');
+  var summaryBody = PS5JB.ui.table(summarySection, ['итог', 'значение', '']);
+  PS5JB.button('Повторить', function () { location.reload(); }).className = 'action secondary';
+
+  function heapNow() {
+    if (window.performance && performance.memory) {
+      return {
+        limit: performance.memory.jsHeapSizeLimit,
+        total: performance.memory.totalJSHeapSize,
+        used: performance.memory.usedJSHeapSize
+      };
+    }
+    return null;
+  }
+
+  function touch(buffer, marker) {
+    var view = new Uint8Array(buffer);
+    for (var offset = 0; offset < view.length; offset += 4096) {
+      view[offset] = marker;
+    }
+    /* Verify the first, middle and last page actually hold the marker. */
+    var last = view.length - 1;
+    return view[0] === marker && view[Math.floor(last / 2)] === marker && view[last] === marker;
+  }
+
+  /* ------------------------------------------------------ 1. contiguous sizes */
+  PS5JB.sequence(SIZES_MIB.map(function (mib) {
+    return function (next) {
+      var bytes = mib * 1024 * 1024;
+      var started = util.now();
+      try {
+        var buffer = new ArrayBuffer(bytes);
+        var verified = touch(buffer, 0x5a);
+        var elapsed = util.now() - started;
+        live.push(buffer);
+        results.sizes.push({ mib: mib, ok: true, ms: util.round(elapsed, 1), verified: verified });
+        results.contiguous_max_bytes = bytes;
+        PS5JB.ui.row(body, verified ? 'ok' : 'warn', mib + ' MiB',
+          'выделено+заполнено за ' + util.ms(elapsed) + (verified ? '' : ', маркер не подтверждён'));
+      } catch (err) {
+        results.sizes.push({ mib: mib, ok: false, error: String(err) });
+        results.errors.push('arraybuffer ' + mib + 'MiB: ' + err);
+        PS5JB.ui.row(body, 'fail', mib + ' MiB', String(err));
+      }
+      next();
+    };
+  }), function () {
+    PS5JB.status('крупные блоки: до ' + util.bytes(results.contiguous_max_bytes));
+    stepChunks();
+  });
+
+  /* --------------------------------------------------- 2. many small chunks */
+  function stepChunks() {
+    var steps = [];
+    var allocated = 0;
+    for (var i = 0; i < CHUNK_LIMIT; i++) {
+      steps.push(function (next) {
+        try {
+          var buffer = new ArrayBuffer(CHUNK_MIB * 1024 * 1024);
+          touch(buffer, 0x21);
+          live.push(buffer);
+          allocated++;
+          results.chunks_total_bytes += CHUNK_MIB * 1024 * 1024;
+        } catch (err) {
+          results.chunks.push({ index: allocated, mib: CHUNK_MIB, ok: false, error: String(err) });
+          results.errors.push('chunk ' + CHUNK_MIB + 'MiB: ' + err);
+          PS5JB.ui.row(body, 'fail', 'чанк #' + (allocated + 1), String(err));
+          /* Stop early once the engine refuses: further attempts only spam the log. */
+          while (steps.length) { steps.pop(); }
+          next();
+          return;
+        }
+        next();
+      });
+    }
+    PS5JB.sequence(steps, function () {
+      results.chunks_total_bytes = allocated * CHUNK_MIB * 1024 * 1024;
+      PS5JB.ui.row(body, allocated ? 'ok' : 'fail', 'чанки по ' + CHUNK_MIB + ' MiB',
+        util.bytes(results.chunks_total_bytes) + ' в ' + allocated + ' блоках');
+      stepFragmentation();
+    });
+  }
+
+  /* ------------------------------------------------------ 3. fragmentation */
+  function stepFragmentation() {
+    var blocks = [];
+    var size = 1024 * 1024;
+    var made = 0;
+    try {
+      for (var i = 0; i < 64; i++) {
+        blocks.push(new ArrayBuffer(size));
+        made++;
+      }
+    } catch (err) {
+      results.errors.push('frag-alloc ' + made + ': ' + err);
+    }
+    /* Release every other block, then ask for a bigger contiguous block. */
+    var freed = 0;
+    for (var j = 0; j < blocks.length; j += 2) {
+      blocks[j] = null;
+      freed++;
+    }
+    var outcome = { allocated: made, freed: freed, big_ok: false };
+    try {
+      var big = new ArrayBuffer(8 * 1024 * 1024);
+      touch(big, 0x33);
+      live.push(big);
+      outcome.big_ok = true;
+    } catch (err) {
+      outcome.error = String(err);
+      results.errors.push('frag-big-8MiB: ' + err);
+    }
+    results.fragmentation = outcome;
+    PS5JB.ui.row(body, outcome.big_ok ? 'ok' : 'warn', 'фрагментация',
+      made + '×1 MiB, освобождено ' + freed + ', затем 8 MiB: ' +
+      (outcome.big_ok ? 'выделилось' : 'отказ'));
+    stepStrings();
+  }
+
+  /* ------------------------------------------------------------ 4. strings */
+  function stepStrings() {
+    var value = 'A';
+    var max = 0;
+    var started = util.now();
+    try {
+      while (value.length < STRING_LIMIT) {
+        /* Doubling with a join keeps the intermediate ropes small. */
+        value = value + value + 'x';
+        max = value.length;
+      }
+    } catch (err) {
+      results.errors.push('string: ' + err);
+    }
+    var elapsed = util.now() - started;
+    results.strings = { max_chars: max, ms: util.round(elapsed, 1), bytes_utf16: max * 2 };
+    PS5JB.ui.row(body, max > 0 ? 'ok' : 'fail', 'строка', max + ' символов (' +
+      util.bytes(max * 2) + ') за ' + util.ms(elapsed));
+    value = null;
+    stepHeap();
+  }
+
+  /* --------------------------------------------------------------- 5. heap */
+  function stepHeap() {
+    results.heap = heapNow();
+    if (results.heap) {
+      PS5JB.ui.row(body, 'info', 'performance.memory', 'limit=' + util.bytes(results.heap.limit) +
+        ', used=' + util.bytes(results.heap.used));
+    } else {
+      PS5JB.ui.row(body, 'warn', 'performance.memory', 'не публикуется');
+    }
+    finish();
+  }
+
+  function finish() {
+    var totalHeld = results.contiguous_max_bytes;
+    var stats = [
+      ['макс. непрерывный ArrayBuffer', util.bytes(results.contiguous_max_bytes), results.contiguous_max_bytes ? 'ok' : 'fail'],
+      ['чанки по ' + CHUNK_MIB + ' MiB', util.bytes(results.chunks_total_bytes) + ' (' +
+        Math.round(results.chunks_total_bytes / (CHUNK_MIB * 1024 * 1024)) + ' шт.)', 'info'],
+      ['пик удержания (approx)', util.bytes(totalHeld + results.chunks_total_bytes), 'info'],
+      ['время теста', util.ms(util.now() - t0), 'info'],
+      ['ошибок/исключений', String(results.errors.length), results.errors.length ? 'warn' : 'ok']
+    ];
+    for (var i = 0; i < stats.length; i++) {
+      PS5JB.ui.row(summaryBody, stats[i][2], stats[i][0], stats[i][1]);
+    }
+    if (results.errors.length) {
+      var errList = PS5JB.ui.h('pre', null, results.errors.join('\n'));
+      summarySection.appendChild(errList);
+    }
+    PS5JB.mark('alloc', results);
+    PS5JB.send('alloc');
+    PS5JB.status('готово: максимум ' + util.bytes(results.contiguous_max_bytes) + ', отправлено в лог');
+  }
+
+  PS5JB.send('alloc', { event: 'started' });
+}());
+</script>
+</body>
+</html>
