@@ -110,7 +110,8 @@ for (const st of stages) {
 const count = (status) => stages.filter((s) => s.status === status).length;
 if (process.env.PB_DEBUG) {
   console.error('[bulk] pipeReadBytes: ' + pipeStats.pipeReadBytesCalls + ' calls / ' +
-                pipeStats.pipeReadBytesBytes + ' bytes; pipeRead: ' + pipeStats.pipeReadCalls +
+                pipeStats.pipeReadBytesBytes + ' bytes; pipeWriteBytes: ' + pipeStats.pipeWriteBytesCalls +
+                ' calls / ' + pipeStats.pipeWriteBytesBytes + ' bytes; pipeRead: ' + pipeStats.pipeReadCalls +
                 '; pipeWrite: ' + pipeStats.pipeWriteCalls);
 }
 console.log(`\nИТОГ: done=${result.done}, стадий=${stages.length}, OK=${count('OK')}, ` +

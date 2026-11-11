@@ -168,9 +168,16 @@ Kernel принимает его в `routingSocketReply()`:
 Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть DEGRADED/FAIL или
 `done != true` (переопределяется `EXPECTED_STAGES`).
 
-### pipeReadBytes — уже реализовано (bulk-чтение ядра через pipe)
+### pipeReadBytes / pipeWriteBytes — bulk-доступ к ядру через pipe (реализовано)
 
-Мост отдаёт `p.pipeReadBytes(addr, len) -> Uint8Array` (kernel-space, команда протокола 0x08) —
-crossPipes использует его автоматически, когда он есть. Факт из прогона (`PB_DEBUG=1`):
-`[bulk] pipeReadBytes: 94 calls / 66254 bytes; pipeRead: 0; pipeWrite: 46` — то есть stage 8 и
-последующие чтения ядра идут 1 round-trip на вызов, побайтовый `pipeRead` не задействован.
+Мост отдаёт симметричные bulk-методы (kernel-space, команды протокола 0x08/0x09):
+`p.pipeReadBytes(addr, len) -> Uint8Array` и `p.pipeWriteBytes(addr, bytes) -> len`.
+crossPipes подхватывает их автоматически (чанковые `pipeRead`/`pipeWrite` — только fallback).
+Факт из прогона (`PB_DEBUG=1`), после добавления bulk-записи:
+
+```
+[bulk] pipeReadBytes: 94 calls / 66254 bytes; pipeWriteBytes: 28 calls / 196 bytes; pipeRead: 0; pipeWrite: 0
+```
+
+То есть чтения и записи ядра идут 1 round-trip на вызов, чанковые fallback-методы не задействованы
+(0 вызовов). 28 bulk-записей = 18 групп AIO (по 8 байт) + точечные записи стадии 10/самопроверки.

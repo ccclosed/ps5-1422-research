@@ -272,7 +272,8 @@ export class AsyncClient {
 }
 
 
-export const pipeStats = { pipeReadBytesCalls: 0, pipeReadBytesBytes: 0, pipeReadCalls: 0, pipeWriteCalls: 0 };
+export const pipeStats = { pipeReadBytesCalls: 0, pipeReadBytesBytes: 0, pipeReadCalls: 0,
+                           pipeWriteCalls: 0, pipeWriteBytesCalls: 0, pipeWriteBytesBytes: 0 };
 
 export function attachPipes(p, client) {
   // bulk-чтение: kernel-модуль предпочитает p.readBytes(addr,len) в crossPipes (1 round-trip)
@@ -293,6 +294,15 @@ export function attachPipes(p, client) {
     for (let i = 0; i < len; i++) p.write1(out.add32(i), bytes[i]);
     p.flush();
     return len;
+  };
+  // pipeWriteBytes: bulk-ЗАПИСЬ ЯДРА через pipe (1 round-trip); симметрично pipeReadBytes.
+  p.pipeWriteBytes = async function (addr, bytes) {
+    p.flush();
+    pipeStats.pipeWriteBytesCalls++;
+    pipeStats.pipeWriteBytesBytes += bytes.length;
+    await client.writeKernel(addr, bytes);
+    p.invalidate();
+    return bytes.length;
   };
   p.pipeWrite = async function (addr, val, len) {
     pipeStats.pipeWriteCalls++;

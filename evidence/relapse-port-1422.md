@@ -793,3 +793,27 @@ else replyBytes = await readProcessBytes(reply, ...)   // сюда падал {p
 malloc, readBytes/writeBytes (память процесса), pipeRead/pipeWrite, **опционально pipeReadBytes/pipeWriteBytes**
 (bulk ядра через pipe), attachKernelPipe, ready; `rw` из attachKernelRw — единственный обязательный путь
 чтения/записи ЯДРА.
+
+
+### 17.2 Итоговые счётчики bulk-каналов (подтверждено с обеих сторон)
+
+`recon-lua-vector` добавил `p.pipeWriteBytes` (команда 0x09); мой `crossPipes` подхватил его
+автоматически, контракт не менялся. Финальный замер (`PB_DEBUG=1`), воспроизведён мной на их demo:
+
+```
+[bulk] pipeReadBytes: 94 calls / 66254 bytes; pipeWriteBytes: 28 calls / 196 bytes; pipeRead: 0; pipeWrite: 0
+```
+
+| канал | вызовов | трафик | комментарий |
+|---|---|---|---|
+| `pipeReadBytes` (bulk чтение ядра) | 94 | 66 254 Б | stage 8 (self-check по rodata) + последующие чтения |
+| `pipeWriteBytes` (bulk запись ядра) | 28 | 196 Б (в среднем 7 Б) | 18 — по одной 8-байтной на AIO-группу (`cleared=18`), ~10 — точечные записи стадии 10 (ucred/security_flags) и самопроверки |
+| `pipeRead` (побайтовый фолбэк) | **0** | 0 | не задействован |
+| `pipeWrite` (чанковый фолбэк) | **0** | 0 | было 46 до замены 2×4 Б → 1×8 Б |
+
+Итог: **все каналы ядра работают bulk-путём, побайтовых фолбэков 0.** Прогоны: их
+`demo-fullchain.py` — 13 стадий / OK=13 / DEGRADED=0 / FAIL=0, EXIT=0; `run.sh` — 9 шагов ALL PASS
+(full-chain 2063 мс, kernel objreply 158 мс); мой `--dry-run-full` и `--dry-run-objreply` — 13/13/0/0;
+`selftest.sh` — EXIT=0.
+
+**Контракт закрыт полностью.** Со стороны kernel-части правок больше не планируется.

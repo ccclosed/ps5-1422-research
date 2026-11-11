@@ -24,7 +24,8 @@
     "run_sh": "9 steps, ALL PASS",
     "fullchain_over_tcp": "PASS in BOTH bridge modes: object {ptr,bytes} (default) and hybrid (PB_RTMSG2=hybrid): 13 stages, OK=13, DEGRADED=0, FAIL=0, ~2.1 s",
     "kernel_objreply_cross_check": "PASS: node tools/jb1422/kernel/relapse1422.js --dry-run-objreply -> 13/13/0/0",
-    "pipeReadBytes_live": "PASS: 94 calls / 66254 bytes in full-chain (pipeRead fallback = 0)"
+    "pipeReadBytes_live": "PASS: 94 calls / 66254 bytes (pipeRead fallback = 0)",
+    "pipeWriteBytes_live": "PASS: 28 calls / 196 bytes (pipeWrite fallback = 0)"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -80,20 +81,20 @@
       "sha256": "37ac2c1a57e2e0a3f87ca90124046036a5518bb7baad21e53dc2f699ea3d552d"
     },
     "README.md": {
-      "bytes": 12142,
-      "sha256": "b90843c75e92b12f8274d34887059dee5058cedfd91385c224c263a56caf76a0"
+      "bytes": 12524,
+      "sha256": "5bce14febe1f519488c9c4d4c5e00cedc30cc1221c994695b0ff6a9799b732bf"
     },
     "demo-fullchain.py": {
       "bytes": 4863,
       "sha256": "10eeb4f021d2741ffab898f66fead0c51a0819a7b2794944c982fc0995540673"
     },
     "run-relapse-over-tcp.mjs": {
-      "bytes": 5050,
-      "sha256": "5fc07d352212f9a2dc18c449a77faef890baa52ea594e24762a2278a57722830"
+      "bytes": 5173,
+      "sha256": "584346847cc2830efa36668450d74a219085826ea29abbf8452d9c46f70ee56a"
     },
     "pb-tcp.mjs": {
-      "bytes": 16505,
-      "sha256": "d3417b8170eb9ab4083aaf7aaa488d740317ec2bcfa2c74dafd3bc62f9065010"
+      "bytes": 16946,
+      "sha256": "202078ad061480c7e107b418e56add404e167cc104ab0594f34c510b5e88f261"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -114,6 +115,6 @@
     "memory_spaces": "process: p.readBytes/read1-8/write1-8; kernel: rw.*, p.pipeReadBytes/p.pipeRead/pipeWrite (proto 0x08/0x09)",
     "regression_guard": "demo-fullchain.py exit!=0 if stages<13/OK<13/DEGRADED/FAIL",
     "debug": "PB_DEBUG=1 prints rtmsg2 type/len/first8/ret@184",
-    "pipe_read_bytes": "p.pipeReadBytes(addr,len) — bulk kernel read via pipe, 1 round-trip; used by crossPipes"
+    "pipe_read_bytes": "p.pipeReadBytes/p.pipeWriteBytes — bulk kernel R/W via pipe, 1 round-trip each; used by crossPipes"
   }
 }
