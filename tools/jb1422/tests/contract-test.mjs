@@ -27,8 +27,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 
-let fails = 0;
+let fails = 0, warns = 0;
 const rows = [];
+function warn(id, name, detail = '') {
+  warns++;
+  rows.push({ id, name, st: 'WARN', detail });
+  console.log(`  [WARN] ${id} ${name}${detail ? ' :: ' + detail : ''}`);
+}
 function check(id, name, cond, detail = '') {
   const st = cond ? 'PASS' : 'FAIL';
   if (!cond) fails++;
@@ -164,6 +169,9 @@ function makeProcessMem() {
 /** Прогнать kernel с заданным видом ответа rtmsg2 и вернуть исход leakKernelBase. */
 async function runKaslrWith(replyFactory) {
   const proc = makeProcessMem();
+  // Кладём валидный author-record по адресу 0x1000: это нужно для формы «число»
+  // (указатель), иначе WARN был бы артефактом мока, а не свойством kernel-модуля.
+  try { proc.mem.set(record, 0x1000); } catch (e) {}
   // p: только то, что нужно стадии KASLR
   const kp = {
     I64: KI64,
@@ -205,8 +213,17 @@ const shapes = [
 for (const [id, label, factory] of shapes) {
   const res = await runKaslrWith(factory);
   const rejectedAsNoReply = !res.ok && NOT_REPLY.test(res.err || '');
-  check(id, 'rtmsg2 → ' + label, !rejectedAsNoReply,
-    res.ok ? 'принято, KASLR прошёл' : ('не принято: ' + String(res.err).slice(0, 80)));
+  if (rejectedAsNoReply) {
+    check(id, 'rtmsg2 → ' + label, false, 'ОТВЕРГНУТО как «не дал ответа»: ' + String(res.err).slice(0, 70));
+  } else if (res.ok) {
+    check(id, 'rtmsg2 → ' + label, true, 'принято, KASLR прошёл');
+  } else {
+    // Форма принята, но байты потерялись — латентный разрыв, не блокер сборки.
+    // Живой контракт (PRIMITIVE-CONTRACT.md:55) — Uint8Array, он проходит.
+    warn(id, 'rtmsg2 → ' + label,
+      'форма принята, но KASLR не прошёл: ' + String(res.err).slice(0, 70) +
+      ' (латентно: copyIntoProcess({ptr,bytes}) делает new Uint8Array(объект) → 0 байт)');
+  }
 }
 
 // ------------------------------------------------------- C4: дубли методов
@@ -244,5 +261,5 @@ const total = rows.length, passed = total - fails;
 console.log('\n' + '='.repeat(72));
 for (const r of rows) console.log(`  ${r.st}  ${r.id.padEnd(18)} ${r.name}`);
 console.log('='.repeat(72));
-console.log(`CONTRACT_RESULT: ${fails === 0 ? 'PASS' : 'FAIL'}  (${passed}/${total}, дублей методов: ${dupTotal})`);
+console.log(`CONTRACT_RESULT: ${fails === 0 ? 'PASS' : 'FAIL'}  (${passed}/${total}, WARN=${warns}, дублей методов: ${dupTotal})`);
 process.exit(fails === 0 ? 0 : 1);
