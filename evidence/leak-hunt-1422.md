@@ -265,3 +265,51 @@ transparent / disposal 0/1/2) = **180 вариантов** (`?max=N` огран�
 `L2-SWEEP-DONE ptrcands=0 best=- variant=SW0-s1-xfffe-y0-f2-local`.
 Все 180 вариантов **декодируются** (мёртвых нет) — это отсекает «декодер отказывается» как
 причину; на ПК OOB не воспроизводится (пост-фикс), реальный вердикт — на консоли 14.22.
+
+---
+
+## Animated WebP / AVIF OOB (кандидат recon-emulation, P0)
+
+**Исходники подтверждены** (commit `7779ac11f20e70a21d82dedd3ba0334fba850f06`):
+- `WEBPImageDecoder.cpp` **L186–188**: внешний буфер декодера выделяется по размерам кадра
+  **из контейнера**: `stride = webpFrame.width * 4`, `size = stride * webpFrame.height`,
+  `is_external_memory = 1`. libwebp при `WebPIUpdate` пишет по размерам **из битстрима** ⇒
+  при `bitstream > ANMF` это OOB-WRITE (L184–196).
+- `WEBPImageDecoder.cpp` **L260–285** `applyPostProcessing`: `decodedWidth/Height` берутся из
+  битстрима (`WebPIDecGetRGB`), единственные проверки — `ASSERT_WITH_SECURITY_IMPLICATION`
+  (**L271–272**); чтение `pixel = rgba + (y*frameRect.width()+x)*4` (**L281**) при
+  `decodedWidth > frameRect.width()` читает **за концом** внешнего буфера ⇒ OOB-READ; байты
+  через `setPixel` попадают в backing store → canvas → `getImageData` → JS.
+- `Assertions.h` **L351–362**: `ASSERT_WITH_SECURITY_IMPLICATION` — **no-op**, если не задан
+  `ENABLE(SECURITY_ASSERTIONS)` ⇒ на релизной PS5 проверки не работают.
+- `AVIFImageReader.cpp` **L100**: `decodedRGBImage.rowBytes = imageSize.width()*sizeof(uint32_t)`
+  — то же семейство (rowBytes по размерам из контейнера); проверки «кадр ≤ canvas» в 7617 нет
+  ⇒ OOB-WRITE (P1). (В нашем срезе исходников это единственная строка с rowBytes; номера
+  L58/L87–101 из сообщения recon-emulation в этой ревизии смещены.)
+
+**Проба:** `tools/jb1422/probes/l3-webp-oob.html`.
+- Генератор **animated WebP на JS**: RIFF (`VP8X` canvas 32×32 + `ANIM` + `ANMF`), payload —
+  валидные VP8L/VP8-битстримы (сгенерированы офлайн PIL; встроены base64). ANMF объявляет
+  МЕНЬШИЙ кадр, чем битстрим → внешний буфер меньше, чем пишет libwebp.
+- Варианты: W1 калибровка (16×1 = 16×1), W2/W3 mismatch 8×1 при payload 16×1 (lossless/
+  lossy), W4 1×1, W5 большие offset'ы `0xFFFE`, W6 canvas 1×1 кадр 8×1, W7 9×1→8×1,
+  W8 два кадра (второй mismatch), W9 64×1→8×1; AVIF: A1 валидный 64×64, A2 ispe пропатчен
+  на 32×32 при payload 64×64.
+- Чтение: `drawImage` 1:1 в natural-размере → `getImageData` → **целевой OOB-регион**
+  (пиксели кадра за объявленной шириной: `x = declaredW..payloadW-1`) → hex-дамп региона +
+  скан 8-байтовых окон на канонические адреса. Плюс sentinel-тест ПИСЬМА: до декода
+  создаются `Uint8Array(4096)=0xAA` и канвас с известными пикселями, после — проверка порчи.
+
+**Критерий на консоли:** `L3-DONE ptrcands=N corrupt=M ...` c `ptrcands>0` **ИЛИ** `corrupt>0`
+(порча sentinel-объекта). Дополнительно смотреть `L3-OOB-REGION <id> hex=...` — если в
+регионе не маркерный `112233ff`, а иные байты, это и есть прочитанная чужая память.
+
+**Локальный контроль (WebKitGTK 2.52.5):** `logs/l3-webp-local.txt` —
+9/11 вариантов декодируются; mismatch-варианты W2/W3/W4/W7/W9 декодируются, OOB-регион
+отдаёт 32/60/4/224 байта, но **все байты = маркерный `112233ff`** (в этой сборке буфер уже
+согласован/перевыделен) ⇒ `ptrcands=0`, `corrupt=0`; W5 (`offsets 0xFFFE`) и W6 (canvas 1×1)
+— decode-fail; AVIF A1/A2 декодируются. Итог: `L3-DONE ptrcands=0 corrupt=0` — на 14.22
+ожидается иной heap-контент за буфером (реальный вердикт — только консоль).
+
+**Взаимодействие с GIF-фаззером:** `l2b-gif-sweep.html` остаётся (180 вариантов, критерий
+`L2-SWEEP-DONE`), но приоритет теперь WebP/AVIF: у WebP сразу и write (P0), и read.
