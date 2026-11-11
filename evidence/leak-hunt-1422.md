@@ -240,3 +240,28 @@ G2/G3/G5/G6/G7; если все `ptrcands=0` — смотреть `foreign` и �
 больше кадра (G6/G7) и `0xFFFF`; 3) добавть `yOffset` при `xOffset=0`; 4) local palette +
 interlaced + прозрачность; 5) BMP/ICO с truncated data (B1/B2/I1) и 32bpp; 6) сравнить два
 cold boot: детерминированные байты = заливка, меняющиеся = heap-содержимое.
+
+---
+
+## Автосвип GIF-OOB: l2b (генеративная матрица) и autorun l2
+
+**l2 автопрогон:** `probes/l2-gif-oob.html` теперь сам перебирает все 12 вариантов и после
+каждого пишет одну строку
+`L2-ROW <id> | nat=WxH | foreign=..B | ptrcands=N | state=decoded|decode-fail|timeout | best=<адрес|->`,
+а в конце — `L2-AUTORUN-SUMMARY` и `L2-AUTORUN-DONE ptrcands=N best=<addr> variant=<id>`
+(локально: 11/12 decoded, TGA decode-fail, `ptrcands=0`).
+
+**l2b свип:** `probes/l2b-gif-sweep.html` — генеративная матрица
+screen {1×1,2×2,4×4,8×8,64×64} × xOffset {0xFFFE,0xFFFF,0x7FFF,65000} ×
+yOffset {0,0xFFFE,0xFFFF} × кадров {2,3,5} × стиль (local palette / interlace /
+transparent / disposal 0/1/2) = **180 вариантов** (`?max=N` ограничивает, например `?max=60`).
+Каждый вариант — отдельный `Image`; декод в try/catch + таймаут 900 мс, прогресс каждые 10;
+если декодер убьёт WebProcess — в beacon останется последний `L2-SWEEP-PROGRESS`. В конце:
+`L2-SWEEP-TOP-FOREIGN`, `L2-SWEEP-PTR-LIST`, `L2-SWEEP-SUMMARY` и решающая строка
+**`L2-SWEEP-DONE ptrcands=N best=<адрес> variant=<id>`**.
+
+**Локальный контроль (WebKitGTK 2.52.5):** `logs/l2b-sweep-local.txt` —
+`L2-SWEEP-PROGRESS 180/180 decoded=180 fail=0 ptrcands=0 ms=2868`,
+`L2-SWEEP-DONE ptrcands=0 best=- variant=SW0-s1-xfffe-y0-f2-local`.
+Все 180 вариантов **декодируются** (мёртвых нет) — это отсекает «декодер отказывается» как
+причину; на ПК OOB не воспроизводится (пост-фикс), реальный вердикт — на консоли 14.22.

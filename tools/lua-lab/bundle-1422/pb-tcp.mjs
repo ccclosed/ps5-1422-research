@@ -95,18 +95,39 @@ export function openSyncPrimitive(host, port, timeoutMs = 30000) {
   // перед любым чтением/непрерывным разрывом и по достижении 32 KiB — семантика та же.
   let pending = null;
   const PEND_MAX = 32768;
+  // кэш чтения: сканеры цепочки читают байты по одному (4096 на чанк), без кэша
+  // это 4604 мс на один чанк. Префетчим страницу и обслуживаем read1 локально.
+  let rcache = null;
+  const PREFETCH = 4096;
   function flushPending() {
     if (pending && pending.bytes.length) {
       call(CMD.WRITE, pending.addr, pending.bytes.length, Uint8Array.from(pending.bytes));
     }
     pending = null;
+    rcache = null;                       // любая запись инвалидирует кэш чтения
+  }
+  function readCached(addrBig) {
+    if (rcache && addrBig >= rcache.addr && addrBig < rcache.addr + BigInt(rcache.buf.length)) {
+      return { buf: rcache.buf, off: Number(addrBig - rcache.addr) };
+    }
+    flushPending();
+    let buf;
+    try {
+      const res = call(CMD.READ, addrBig, PREFETCH);
+      buf = Uint8Array.from(data.subarray(0, Math.max(1, res.len)));
+    } catch {
+      const res = call(CMD.READ, addrBig, 1);   // у границы маппинга префетч может упасть
+      buf = Uint8Array.from(data.subarray(0, Math.max(1, res.len)));
+    }
+    rcache = { addr: addrBig, buf };
+    return { buf, off: 0 };
   }
 
   const p = {
     flush() { flushPending(); },
     ready() { return true; },
     reason() { return 'tcp'; },
-    read1(addr) { flushPending(); return call(CMD.READ, addr, 1).length ? data[0] : data[0]; },
+    read1(addr) { const { buf, off } = readCached(toBigInt(addr)); return buf[off]; },
     read4(addr) {
       flushPending();
       call(CMD.READ, addr, 4);
@@ -230,6 +251,25 @@ export class AsyncClient {
     parts.push(Buffer.from(bytes));
     await this.roundTrip(Buffer.concat(parts), 0);
   }
+}
+
+
+export function attachPipes(p, client) {
+  p.pipeRead = async function (addr, len, out) {
+    const bytes = await client.read(addr, len);
+    p.flush();
+    for (let i = 0; i < len; i++) p.write1(out.add32(i), bytes[i]);
+    p.flush();
+    return len;
+  };
+  p.pipeWrite = async function (addr, val, len) {
+    const v = toBigInt(val);
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = Number((v >> BigInt(8 * i)) & 0xFFn);
+    await client.write(addr, bytes);
+    return len;
+  };
+  return p;
 }
 
 export function makeChain(asyncClient, syncPrimitive) {

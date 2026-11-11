@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 
-import { openSyncPrimitive, AsyncClient, makeChain, makeRw } from './pb-tcp.mjs';
+import { openSyncPrimitive, AsyncClient, makeChain, makeRw, attachPipes } from './pb-tcp.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JB1422 = path.resolve(HERE, '../../jb1422');
@@ -60,6 +60,7 @@ const p = openSyncPrimitive(host, port);
 const client = await new AsyncClient(host, port).connect();
 const chain = makeChain(client, p);
 const rw = makeRw(client);
+attachPipes(p, client);   // stage 8: cross-pipes через p.pipeRead/p.pipeWrite
 
 console.log(`primitive: p.ready=${p.ready()} p.reason=${p.reason()}`);
 console.log(`firmware: ${KRW.firmware}; payload: ${payloadLabel}`);

@@ -39,3 +39,30 @@
 1. `probes/v918_apng_overread2.html` — ожидаемо 0 (APNG закрыт, §A) — это контроль, что стенд не врёт.
 2. GIF-кандидат: сгенерировать GIF: screen 1×1, image descriptor с xOffset=65000/width=2 → в release-frameRect отрицательный; смотреть, доходят ли пиксели до `getImageData` (в 2.52.5 может быть уже исправлено — тогда проверить на эмуляции 7617).
 3. ICO/BMP/TGA: прогнать те же «frameRect > size» идеи (декодеры не проверял — [#L133-L137] ASSERT-only общий).
+
+## E. Другие декодеры того же класса (ASSERT-only границы) — проверено по 7617.1.11
+
+Важно: `ASSERT_WITH_SECURITY_IMPLICATION` — no-op, если не включён `ENABLE(SECURITY_ASSERTIONS)`
+([Assertions.h#L351-L362](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WTF/wtf/Assertions.h#L351-L362)) — в релизной сборке PS5 почти наверняка выключен, т.е. это «ASSERT-only».
+
+| формат | механизм | read/write | ASSERT-only? | строки | приоритет |
+|---|---|---|---|---|---|
+| **WebP (animated)** | буфер декодера выделяется по размерам кадра **из контейнера** (demux), а libwebp декодирует по размерам **из битстрима**; при расхождении — запись мимо external-буфера; затем `applyPostProcessing` читает со stride `frameRect.width()`, но x до `decodedWidth` → чтение мимо буфера | **write + read** | да (#L271-L272) | [WEBPImageDecoder.cpp#L184-L196](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/webp/WEBPImageDecoder.cpp#L184-L196), [#L265-L285](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/webp/WEBPImageDecoder.cpp#L265-L285) | **P0** |
+| **AVIF (animated)** | `rowBytes = imageSize.width()*4`, `pixels = pixelAt(0,0)`, затем `avifImageYUVToRGB` пишет `image->height` строк по `image->width`; `imageSize` — от первого изображения (`setSize`), размеры кадра — из битстрима | write (+ чтение через canvas) | явных проверок нет | [AVIFImageReader.cpp#L58](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp#L58), [#L87-L101](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp#L87-L101) | P1 |
+| **GIF** (уже в §C) | отрицательная ширина frameRect → `setFrameRect` без проверки; чтение на пути отрисовки | read (write заблокирован) | да | [ImageBackingStore.h#L77-L81](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/graphics/ImageBackingStore.h#L77-L81) | P1 |
+| **ICO** | `setSize` требует `size == m_frameSize`, иначе fail; размеры ≤256 | нет | — | [ICOImageDecoder.cpp#L80-L84](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/ico/ICOImageDecoder.cpp#L80-L84) | P3 (закрыто) |
+| **BMP** | размеры из info-header проходят `isInfoHeaderValid()` до `setSize`; запись строк в пределах объявленного размера | нет (консистентно) | нет | [BMPImageReader.cpp#L139-L170](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/bmp/BMPImageReader.cpp#L139-L170) | P3 |
+| **JPEG** | размеры из libjpeg; scaled-путь читает `pixelAt(0, sourceY)`; расхождение возможно только при ошибке масштабирования | read? | [не проверено] | [JPEGImageDecoder.cpp#L621](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/jpeg/JPEGImageDecoder.cpp#L621), #L644-L660 | P2 |
+| **PNG/APNG** | закрыто (проверка fcTL + clamp), см. §A | — | — | [PNGImageDecoder.cpp#L645-L649](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/png/PNGImageDecoder.cpp#L645-L649) | P3 |
+| **TGA** | в 7617 декодера нет (`tga/TGAImageDecoder.cpp` → 404 в теге) | — | — | — | — |
+
+### Два лучших PoC-сценария (для webkit-1422)
+
+**PoC-1: animated WebP, расхождение «контейнер ↔ битстрим» (write + read).**
+Собрать RIFF/WEBP: `VP8X` canvas 32×32; `ANMF` кадр с полями x=0,y=0,**w=8,h=1**, payload = VP8-битстрим с заголовком **16×1**.
+* WebKit выделит external-буфер `8*4*1 = 32 Б` ([#L186-L189](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/webp/WEBPImageDecoder.cpp#L184-L196)), а libwebp запишет 16 px = 64 Б → **32 Б OOB-write** (класс «порча памяти», без знания адреса);
+* затем цикл `applyPostProcessing` идёт `x < decodedWidth(16)` со stride 8 ([#L270-L285](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/webp/WEBPImageDecoder.cpp#L270-L285)) → читает смещения 32..63 мимо буфера; эти байты пишутся в canvas (`pixelAt(canvasX=0..15)` внутри canvas 32) → `getImageData` отдаёт их в JS = **утечка**.
+* Калибровка: начать с w=8/h=1 ↔ битстрим 9×1 (8 Б OOB), затем расширять `decodedWidth` до 16–24, наблюдая крэши (окно утечки и размер OOB-write растут вместе).
+
+**PoC-2: AVIF, кадр больше canvas (write→возможная утечка).**
+Собрать AVIF: primary image (canvas) 32×32, но кадр (`iloc`/`ispe` кадра) объявить 64×64. `avifImageYUVToRGB` получит `image->width/height` кадра, а `rowBytes` — от canvas ([AVIFImageReader.cpp#L100-L101](https://github.com/WebKit/WebKit/blob/7779ac11f20e70a21d82dedd3ba0334fba850f06/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp#L100-L101)): строки пойдут с шагом canvas-ширины → и переполнение backing store, и «диагональное» искажение; читать результат через `getImageData`. Требует проверить, что libavif не режет кадр по canvas (в 7617 проверки в AVIFImageReader нет).

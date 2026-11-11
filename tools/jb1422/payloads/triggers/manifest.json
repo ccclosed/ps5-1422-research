@@ -1,0 +1,53 @@
+{
+ "generated_by": "recon-fw-exists",
+ "firmware": "14.22",
+ "purpose": "AIO sanity triggers для стадии 13",
+ "triggers": [
+  {
+   "file": "t1_aio_wait_race.elf",
+   "bytes": 10000,
+   "sha256": "9a618b694f08a812c60eca3c50b793539939a6506c0282fc0aaa2b92ce4d4a38",
+   "elf64": true,
+   "e_type": 2,
+   "machine": "0x3e",
+   "source": "tools/kexpl/t1_aio_wait_race.elf"
+  },
+  {
+   "file": "t2_aio_del_reuse.elf",
+   "bytes": 9832,
+   "sha256": "f37c7dd5f17b872cf959a92d0754f444c3a1f52d01757ee3e5c6911b9fb87d49",
+   "elf64": true,
+   "e_type": 2,
+   "machine": "0x3e",
+   "source": "tools/kexpl/t2_aio_del_reuse.elf"
+  },
+  {
+   "file": "t3_umtx_shm.elf",
+   "bytes": 9832,
+   "sha256": "5de9374ddf3634e7f23aab5b383fc77640a664fca8ac74d28b785cbf7bc38c38",
+   "elf64": true,
+   "e_type": 2,
+   "machine": "0x3e",
+   "source": "tools/kexpl/t3_umtx_shm.elf"
+  },
+  {
+   "file": "t4_ip6_msfilter.elf",
+   "bytes": 9840,
+   "sha256": "5f39baf63f8ca4f99e105bce714bcd7a226e06a2e370796730c73a76db9de25b",
+   "elf64": true,
+   "e_type": 2,
+   "machine": "0x3e",
+   "source": "tools/kexpl/t4_ip6_msfilter.elf"
+  },
+  {
+   "file": "t5_aio_poll_abuse.elf",
+   "bytes": 14304,
+   "sha256": "c1003b6e266f7753884b839ac8e417a40975b34eb3bdf817c52bffee93dd2095",
+   "elf64": true,
+   "e_type": 2,
+   "machine": "0x3e",
+   "source": "tools/kexpl/t5_aio_poll_abuse.elf"
+  }
+ ],
+ "marker_log": "/data/kexpl-t1.log (после перезагрузки); при панике — klog/серийная консоль"
+}
