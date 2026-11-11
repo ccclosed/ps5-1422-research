@@ -766,3 +766,30 @@ else replyBytes = await readProcessBytes(reply, ...)   // сюда падал {p
 (обычный `Array` тоже принимается), `ptr` — адрес в памяти процесса; hybrid — только совместимость.
 Регрессионный контроль дублирован с обеих сторон: у них `demo-fullchain.py` (exit≠0 при
 стадий<13/OK<13/DEGRADED>0/FAIL>0), у нас `--dry-run-objreply`; их `run.sh` включает наш режим шагом 8.
+
+
+### 17.1 Симметричный bulk-путь для ЗАПИСИ ядра (`pipeWriteBytes`)
+
+`recon-lua-vector` подтвердил замерами, что `pipeReadBytes` у них живой и уже подхватывается:
+```
+[bulk] pipeReadBytes: 94 calls / 66254 bytes; pipeRead: 0; pipeWrite: 46
+```
+То есть stage 8 и последующие чтения ядра идут bulk-путём, побайтовый фолбэк не задействован (0 вызовов).
+
+Симметрично добавлена поддержка **bulk-записи ядра** `p.pipeWriteBytes(addr, bytes)`:
+
+* в адаптере `crossPipes` запись теперь идёт одним `pipeWriteBytes`, если мост его даёт
+  (иначе прежний чанковый `pipeWrite` — совместимость сохранена);
+* в `defuseAioGroups()` две записи по 4 байта заменены **одной 8-байтной** (`kwrite64` головы
+  waiter-массива) — это ровно та операция, которая давала `pipeWrite: 46` в замере;
+* ожидаемый эффект: `defuse` при 18 группах и до 3 попыток — было до 108 4-байтных записей,
+  стало до 54 8-байтных; после появления `pipeWriteBytes` в мосте — **18** (1 на группу).
+
+Проверки после правки: `--dry-run-full` 13 / OK=13 / DEGRADED=0; `--dry-run-objreply` 13/13;
+фикс `defuse` не сломал результат — `STAGE 9: OK — cleared=18 failed=0`; их `demo-fullchain.py` 13/13;
+`selftest.sh` EXIT=0 (тестов=19, PASS=17, FAIL=0, SKIP=2).
+
+Итоговый контракт (окончательный): `chain.rtmsg2() -> {ptr, bytes}`; `p`: read1/4/8, write1/4/8,
+malloc, readBytes/writeBytes (память процесса), pipeRead/pipeWrite, **опционально pipeReadBytes/pipeWriteBytes**
+(bulk ядра через pipe), attachKernelPipe, ready; `rw` из attachKernelRw — единственный обязательный путь
+чтения/записи ЯДРА.

