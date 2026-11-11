@@ -119,6 +119,24 @@ else
   step_end "full-chain TCP" "FAIL" "see output"
 fi
 
+step_start "8. Контроль контракта: kernel --dry-run-objreply"
+KERNEL_JS="$SCRIPT_DIR/../../jb1422/kernel/relapse1422.js"
+if [ ! -f "$KERNEL_JS" ]; then
+  step_end "kernel objreply" "PASS" "skipped (kernel/ не найден)"
+elif ! command -v node >/dev/null 2>&1; then
+  step_end "kernel objreply" "PASS" "skipped (нет node)"
+elif OUT=$(timeout 180 node "$KERNEL_JS" --dry-run-objreply 2>&1); then
+  echo "$OUT" | grep -E 'ИТОГ' | tail -1
+  if printf '%s' "$OUT" | grep -q 'стадий=13, OK=13, DEGRADED=0, FAIL=0'; then
+    step_end "kernel objreply" "PASS" "чистый {ptr,bytes}: 13/13/0/0"
+  else
+    step_end "kernel objreply" "FAIL" "контракт {ptr,bytes} сломан в kernel"
+  fi
+else
+  echo "$OUT" | tail -5
+  step_end "kernel objreply" "FAIL" "see output"
+fi
+
 echo
 echo "==================== SUMMARY ===================="
 for i in "${!NAMES[@]}"; do

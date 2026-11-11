@@ -160,6 +160,10 @@ Kernel принимает его в `routingSocketReply()`:
 `PB_RTMSG2=hybrid` — **legacy-опция** для старого kernel: `Uint8Array` с полями `.ptr`/`.bytes`
 (старый путь звал `new Uint8Array(obj)` и получал 0 байт). Оба режима проверены на ПК: 13/13/0/0.
 
+Кросс-проверка контракта со стороны kernel: `run.sh` шаг 8 гоняет
+`node tools/jb1422/kernel/relapse1422.js --dry-run-objreply` (мок отдаёт чистый `{ptr,bytes}`)
+и требует `13/13/0/0` — регрессия этого бага теперь ловится с обеих сторон.
+
 Отладка: `PB_DEBUG=1` печатает режим, тип, длину, первые 8 байт и `ret@184`.
 Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть DEGRADED/FAIL или
 `done != true` (переопределяется `EXPECTED_STAGES`).

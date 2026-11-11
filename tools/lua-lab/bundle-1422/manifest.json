@@ -21,8 +21,9 @@
     "lua_probe_selftest": "PASS (Lua 5.1 compile + stub loader stages)",
     "sender_selftest": "PASS (8-byte LE framing)",
     "agent_lua_lua51_compile": "PASS",
-    "run_sh": "7/7 PASS",
-    "fullchain_over_tcp": "PASS in BOTH bridge modes: object {ptr,bytes} (default) and hybrid (PB_RTMSG2=hybrid): 13 stages, OK=13, DEGRADED=0, FAIL=0, ~2.1 s"
+    "run_sh": "9 steps, ALL PASS",
+    "fullchain_over_tcp": "PASS in BOTH bridge modes: object {ptr,bytes} (default) and hybrid (PB_RTMSG2=hybrid): 13 stages, OK=13, DEGRADED=0, FAIL=0, ~2.1 s",
+    "kernel_objreply_cross_check": "PASS: node tools/jb1422/kernel/relapse1422.js --dry-run-objreply -> 13/13/0/0"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -74,12 +75,12 @@
       "sha256": "f574eba4f59024096548be35e65f1224439c801e4576764176c34aba2f4e18f2"
     },
     "run.sh": {
-      "bytes": 4777,
-      "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
+      "bytes": 5589,
+      "sha256": "37ac2c1a57e2e0a3f87ca90124046036a5518bb7baad21e53dc2f699ea3d552d"
     },
     "README.md": {
-      "bytes": 11184,
-      "sha256": "adbe918e7eedf1104babd087452b8ca87c61f6162ad75104338d5657e36c08f9"
+      "bytes": 11530,
+      "sha256": "48f73dd4ebf37b3ead99a54c6f91970f6e01f0645e1ef5cb35ed3be5c1ecc24e"
     },
     "demo-fullchain.py": {
       "bytes": 4863,

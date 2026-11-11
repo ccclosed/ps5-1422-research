@@ -145,6 +145,29 @@ else
   row SKIP "tests/full-chain-mock.js" "файла пока нет (владелец: recon-1422-status)"
 fi
 
+# --- 4c. tests/contract-test.mjs — стыки мост <-> kernel (WARN не валит сборку) ---
+if [ -f tests/contract-test.mjs ]; then
+  if t "tests/contract-test.mjs" node tests/contract-test.mjs; then
+    WARN_LINE="$(grep -oE 'WARN=[0-9]+' logs/selftest-*.log 2>/dev/null | tail -1 || true)"
+    row PASS "tests/contract-test.mjs" "контракты целы ${WARN_LINE:+($WARN_LINE)}"
+  else
+    row FAIL "tests/contract-test.mjs" "exit != 0: разошлись стыки p/chain/rw; см. $LOG"
+  fi
+else
+  row SKIP "tests/contract-test.mjs" "файла нет"
+fi
+
+# --- 4d. tests/regression-matrix.sh — 4 режима kernel + demo-fullchain ---------
+if [ -f tests/regression-matrix.sh ]; then
+  if t "tests/regression-matrix.sh --fast" bash tests/regression-matrix.sh --fast; then
+    row PASS "tests/regression-matrix.sh" "все режимы совпали с ожиданием"
+  else
+    row FAIL "tests/regression-matrix.sh" "поведение режима разошлось; см. $LOG"
+  fi
+else
+  row SKIP "tests/regression-matrix.sh" "файла нет"
+fi
+
 # --- 5. python-синтаксис тестового раннера --------------------------------
 if [ -f tests/run_local_webkit.py ]; then
   if python3 -c "compile(open('tests/run_local_webkit.py', encoding='utf-8').read(), 'tests/run_local_webkit.py', 'exec')" >>"$LOG" 2>&1; then
