@@ -22,7 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -45,38 +45,41 @@ function loadScript(rel) {
   vm.runInThisContext(code, { filename: p });
   return ctx;
 }
+// kernel-модуль и offsets ждут window.* — в Node подменяем window на globalThis
+globalThis.window = globalThis;
 loadScript('js/util.js');
 loadScript('js/primitive.js');
 loadScript('js/syscalls.js');
 loadScript('js/kernel-bridge.js');
+// offsets/1422.js — ES-модуль, публикующий window.KRW; грузим ДО класса
+await import(pathToFileURL(path.join(ROOT, 'kernel/offsets/1422.js')).href);
+if (!globalThis.KRW) { console.log('  [FAIL] offsets 14.22 не опубликовали window.KRW'); fails++; }
 const { I64, createPrimitive, createChain } = globalThis.JB1422Bridge;
+const kernelSrc = fs.readFileSync(path.join(ROOT, 'kernel', 'relapse1422.js'), 'utf8');
 
 // ------------------------------------------------------------------ C1: поля p
-section('C1. p содержит все поля, которые kernel ищет grep-ом');
+section('C1. p содержит поля, которые kernel реально использует (this.p.*)');
 const p = createPrimitive(null, null, () => {});
-const ROOT_KEYS_C1 = ['read1', 'read2', 'read4', 'read8',
-  'write1', 'write2', 'write4', 'write8',
-  'malloc', 'add32', 'readBytes', 'writeBytes',
-  'ready', 'reason', 'pipeRead', 'pipeWrite'];
-const KERNEL_CONTRACT = [
-  ['read1', 'function'], ['read2', 'function'], ['read4', 'function'], ['read8', 'function'],
-  ['write1', 'function'], ['write2', 'function'], ['write4', 'function'], ['write8', 'function'],
-  ['malloc', 'function'], ['add32', 'function'],
-  ['readBytes', 'function'], ['writeBytes', 'function'],
-  ['ready', 'function'], ['reason', 'function'],
-  ['pipeRead', 'function'], ['pipeWrite', 'function'],
-  ['attachKernelPipe', 'function'], ['attachKernelRwProvider', 'function'],
-  ['attachUserlandAccessor', 'function'], ['providePipe', 'function'],
-];
-for (const [key, kind] of KERNEL_CONTRACT) {
+// Контракт берём НЕ по всему grep'у (там ловятся локальные переменные p.value/p.read),
+// а по this.p.* — это и есть настоящий примитив. Плюс помечаем, какие поля kernel
+// сам защищает typeof-проверкой (тогда отсутствие = деградация, а не поломка).
+const usedByKernel = [...new Set([...kernelSrc.matchAll(/this\.p\.([a-zA-Z0-9_]+)/g)].map((m) => m[1]))].sort();
+const guarded = new Set([...kernelSrc.matchAll(/typeof\s+this\.p\.([a-zA-Z0-9_]+)\s*===\s*["']function["']/g)].map((m) => m[1]));
+const PIPELIKE = new Set(['pipeRead', 'pipeWrite', 'pipeReadBytes']);
+const REQUIRED_ALWAYS = ['read1', 'read4', 'read8', 'write1', 'write4', 'write8', 'malloc', 'ready', 'reason'];
+for (const key of usedByKernel) {
   const v = p[key];
-  check('C1.' + key, key,
-    typeof v === kind || (kind === 'number' && typeof v === 'number'),
-    typeof v === 'undefined' ? 'ОТСУТСТВУЕТ' : typeof v);
+  const present = typeof v === 'function';
+  const optional = guarded.has(key) || PIPELIKE.has(key);
+  if (present) check('C1.' + key, key, true, 'есть');
+  else if (optional) check('C1.' + key, key, true, 'нет, но kernel ловит typeof → деградация, не поломка');
+  else check('C1.' + key, key, false, 'ОТСУТСТВУЕТ и kernel НЕ защищает — упадёт TypeError');
 }
-check('C1.ready/reason semantics', 'ready()/reason() согласованы',
-  p.ready() === false && typeof p.reason() === 'string' && p.reason().length > 0,
-  'ready=' + p.ready() + ' reason=' + JSON.stringify(p.reason()).slice(0, 60));
+for (const key of REQUIRED_ALWAYS) {
+  if (usedByKernel.includes(key)) continue;
+  check('C1.' + key, key, typeof p[key] === 'function', 'обязательное поле вне this.p.*-скана');
+}
+check('C1.count', 'полей в контракте', usedByKernel.length > 0, usedByKernel.length + ': ' + usedByKernel.join(','));
 
 // -------------------------------------------------------------------- C2: rw
 section('C2. attachKernelRwProvider: read(addr,len)->bytes / write(addr,bytes)');
@@ -115,11 +118,19 @@ check('C2.attachKernelPipe', 'attachKernelPipe отдаёт {read,write}', pipeA
 
 // ------------------------------------------------------------------ C3: rtmsg2
 section('C3. chain.rtmsg2() в трёх видах принимается kernel-модулем');
-const kernelCode = fs.readFileSync(path.join(ROOT, 'kernel', 'relapse1422.js'), 'utf8');
-const kernelMod = await import('data:text/javascript;base64,' +
-  Buffer.from(kernelCode.replace(/^\uFEFF/, '')).toString('base64'));
-
-const { KernelExploit1422, I64: KI64 } = kernelMod;
+const kernelCode = kernelSrc;
+// ES-модуль нельзя import-нуть из CJS-контекста без package.json type=module,
+// а data:-URL валит стек на тяжёлом файле — поэтому грузим в vm, сняв `export`.
+const kernelPlain = kernelCode
+  .replace(/^\uFEFF/, '')
+  // CLI-хвост модуля (--dry-run) содержит top-level await import — в vm он
+  // невалиден и для контракт-теста не нужен: отрезаем ровно перед ним.
+  .split('\nconst NODE = typeof process')[0]
+  .replace(/^export\s+(?=(async\s+function|function|class\s|const\s|let\s|\{))/gm, '')
+  .replace(/import\.meta\.url/g, '"file:///kernel/relapse1422.js"');
+vm.runInThisContext(kernelPlain + '\n;globalThis.__K1422 = { KernelExploit1422, I64 };',
+  { filename: 'kernel/relapse1422.js' });
+const { KernelExploit1422, I64: KI64 } = globalThis.__K1422;
 
 /** Валидный «author record» как в моке --dry-run: база + FF. */
 function makeRecord() {

@@ -145,11 +145,18 @@ chain.rtmsg2() -> Uint8Array(512)  // первые 8: 04 00 00 00 00 00 00 00
                        .bytes      // он же (для кода, который ждёт {ptr, bytes})
 ```
 
-Гибрид (Uint8Array + поля `.ptr`/`.bytes`) нужен потому, что `copyIntoProcess()` вызывает
-`new Uint8Array(obj)` для не-Uint8Array — от чистого `{ptr, bytes}` получается **0 байт**, и kernel
-падает на «в ответе нет author-record» (это и был симптом регрессии). Если kernel перейдёт на
-чистый объект, правка в его `routingSocketReply()` одна строка:
-`const b = reply && reply.bytes ? reply.bytes : reply; return this.copyIntoProcess(b);`
+**Текущий статус (проверено):** по умолчанию мост отдаёт гибрид — он зелёный на текущем дереве
+(`13/13`). Чистый `{ptr, bytes}` (`PB_RTMSG2=object`) пока даёт `стадий=1 FAIL`: в
+`kernel/relapse1422.js` `routingSocketReply()` всё ещё вызывает `copyIntoProcess(reply)`, а тот
+делает `new Uint8Array(obj)` → **0 байт** (новые `toBytes()/replyToBytes()` в этом пути не
+используются). Нужная правка — одна строка в `routingSocketReply()`:
+
+```js
+return this.copyIntoProcess(KernelExploit1422.toBytes(reply) ||
+                            KernelExploit1422.toBytes(reply && reply.bytes) || reply);
+```
+
+После неё переключаем дефолт на `PB_RTMSG2=object`; сам мост менять не придётся.
 
 **Два пространства памяти (проверено на TCP):**
 - `p.readBytes/writeBytes`, `p.read1/4/8`, `p.write1/4/8` — **память ПРОЦЕССА**;

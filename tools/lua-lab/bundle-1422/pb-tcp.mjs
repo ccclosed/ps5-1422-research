@@ -326,6 +326,13 @@ export function makeChain(asyncClient, syncPrimitive) {
       // ОБЪЕКТ { ptr, bytes }, где bytes — Uint8Array(512). PB_RTMSG2=hybrid
       // возвращает Uint8Array с полями .ptr/.bytes (совместимость со старым kernel,
       // который звал new Uint8Array(obj) и получал 0 байт).
+      // КОНТРАКТ (финальный, согласован с владельцем kernel-модуля): chain.rtmsg2()
+      // возвращает ОБЪЕКТ { ptr, bytes }, где ptr — адрес буфера в памяти ПРОЦЕССА,
+      // bytes — Uint8Array(512). Kernel принимает его через routingSocketReply():
+      //   const bytes = KernelExploit1422.toBytes(reply) ||
+      //                 KernelExploit1422.toBytes(reply && reply.bytes);
+      // PB_RTMSG2=hybrid — legacy: Uint8Array с полями .ptr/.bytes (для старого kernel,
+      // который звал new Uint8Array(obj)). По умолчанию — чистый object.
       const mode = process.env.PB_RTMSG2 || 'object';
       let reply;
       if (mode === 'hybrid') {
