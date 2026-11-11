@@ -25,10 +25,24 @@ tools/      рабочий код: jb1422 (джейлбрейк-кит), kexpl (
 Готовая точка входа — `tools/jb1422/`:
 
 ```bash
-bash tools/jb1422/selftest.sh      # 17 тестов, FAIL=0, exit 0
-bash tools/jb1422/run.sh           # поднимает HTTP-стенд для консоли
-node tools/jb1422/kernel/relapse1422.js --dry-run-full   # 12 стадий, OK=12 DEGRADED=0 FAIL=0
+bash tools/jb1422/selftest.sh                              # 19 тестов, PASS=17, FAIL=0, exit 0
+node tools/jb1422/tests/contract-test.mjs                  # контракт p/chain/rw: 25/25, дублей 0
+bash tools/jb1422/tests/regression-matrix.sh               # 5 режимов + TCP: PASS=5
+bash tools/lua-lab/bundle-1422/run.sh                      # 9 шагов, ALL PASS
+node tools/jb1422/kernel/relapse1422.js --dry-run-full     # 13 стадий, OK=13 DEGRADED=0 FAIL=0
+python3 tools/lua-lab/bundle-1422/demo-fullchain.py        # то же через TCP-примитив
+bash tools/jb1422/run.sh                                   # HTTP-стенд для консоли
 ```
+
+Пять режимов dry-run покрывают разные ситуации и все ведут себя ожидаемо:
+
+| режим | результат |
+|---|---|
+| `--dry-run` | 13 стадий, OK=12, DEGRADED=1 (стадия 8 требует pipe-хелперов) |
+| `--dry-run-full` | 13 стадий, **OK=13, DEGRADED=0** |
+| `--dry-run-objreply` | 13 стадий, OK=13 (чистый `{ptr, bytes}` от моста) |
+| `--dry-run-no-oid` | 13 стадий, OK=11, DEGRADED=2 (fallback без oid) |
+| `--dry-run-kaslr-fail` | останавливается на стадии 4 — self-DoS guard ловит мусорные чтения |
 
 ## Ключевые результаты (все проверяемы)
 
