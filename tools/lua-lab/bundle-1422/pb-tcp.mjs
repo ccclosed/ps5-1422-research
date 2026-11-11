@@ -272,13 +272,21 @@ export class AsyncClient {
 }
 
 
+export const pipeStats = { pipeReadBytesCalls: 0, pipeReadBytesBytes: 0, pipeReadCalls: 0, pipeWriteCalls: 0 };
+
 export function attachPipes(p, client) {
   // bulk-чтение: kernel-модуль предпочитает p.readBytes(addr,len) в crossPipes (1 round-trip)
   p.readBytes = async function (addr, len) { p.flush(); return client.read(addr, len); };
   p.writeBytes = async function (addr, bytes) { const r = await client.write(addr, bytes); p.invalidate(); return r; };
   // pipeReadBytes: bulk-чтение ЯДРА через pipe (p.readBytes — это ПРОЦЕСС, не путать)
-  p.pipeReadBytes = async function (addr, len) { p.flush(); return client.readKernel(addr, len); };
+  p.pipeReadBytes = async function (addr, len) {
+    p.flush();
+    pipeStats.pipeReadBytesCalls++;
+    pipeStats.pipeReadBytesBytes += len;
+    return client.readKernel(addr, len);
+  };
   p.pipeRead = async function (addr, len, out) {
+    pipeStats.pipeReadCalls++;
     p.flush();
     const bytes = await client.readKernel(addr, len);
     p.flush();
@@ -287,6 +295,7 @@ export function attachPipes(p, client) {
     return len;
   };
   p.pipeWrite = async function (addr, val, len) {
+    pipeStats.pipeWriteCalls++;
     const v = toBigInt(val);
     const bytes = new Uint8Array(len);
     for (let i = 0; i < len; i++) bytes[i] = Number((v >> BigInt(8 * i)) & 0xFFn);

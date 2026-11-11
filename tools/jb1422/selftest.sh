@@ -148,7 +148,7 @@ fi
 # --- 4c. tests/contract-test.mjs — стыки мост <-> kernel (WARN не валит сборку) ---
 if [ -f tests/contract-test.mjs ]; then
   if t "tests/contract-test.mjs" node tests/contract-test.mjs; then
-    WARN_LINE="$(grep -oE 'WARN=[0-9]+' logs/selftest-*.log 2>/dev/null | tail -1 || true)"
+    WARN_LINE="$(grep -hoE 'WARN=[0-9]+' logs/selftest-*.log 2>/dev/null | tail -1 || true)"
     row PASS "tests/contract-test.mjs" "контракты целы ${WARN_LINE:+($WARN_LINE)}"
   else
     row FAIL "tests/contract-test.mjs" "exit != 0: разошлись стыки p/chain/rw; см. $LOG"

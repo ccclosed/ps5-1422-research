@@ -23,7 +23,8 @@
     "agent_lua_lua51_compile": "PASS",
     "run_sh": "9 steps, ALL PASS",
     "fullchain_over_tcp": "PASS in BOTH bridge modes: object {ptr,bytes} (default) and hybrid (PB_RTMSG2=hybrid): 13 stages, OK=13, DEGRADED=0, FAIL=0, ~2.1 s",
-    "kernel_objreply_cross_check": "PASS: node tools/jb1422/kernel/relapse1422.js --dry-run-objreply -> 13/13/0/0"
+    "kernel_objreply_cross_check": "PASS: node tools/jb1422/kernel/relapse1422.js --dry-run-objreply -> 13/13/0/0",
+    "pipeReadBytes_live": "PASS: 94 calls / 66254 bytes in full-chain (pipeRead fallback = 0)"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -79,20 +80,20 @@
       "sha256": "37ac2c1a57e2e0a3f87ca90124046036a5518bb7baad21e53dc2f699ea3d552d"
     },
     "README.md": {
-      "bytes": 11530,
-      "sha256": "48f73dd4ebf37b3ead99a54c6f91970f6e01f0645e1ef5cb35ed3be5c1ecc24e"
+      "bytes": 12142,
+      "sha256": "b90843c75e92b12f8274d34887059dee5058cedfd91385c224c263a56caf76a0"
     },
     "demo-fullchain.py": {
       "bytes": 4863,
       "sha256": "10eeb4f021d2741ffab898f66fead0c51a0819a7b2794944c982fc0995540673"
     },
     "run-relapse-over-tcp.mjs": {
-      "bytes": 4764,
-      "sha256": "b9e5df26638c8dccbfb389fb737bb56bac7d6037740fb04c45944cbae4d47a83"
+      "bytes": 5050,
+      "sha256": "5fc07d352212f9a2dc18c449a77faef890baa52ea594e24762a2278a57722830"
     },
     "pb-tcp.mjs": {
-      "bytes": 16242,
-      "sha256": "b17ab4758802d4b8ec774f5d1dcd2c66f4073982d925051355b1c9dedc4aec4c"
+      "bytes": 16505,
+      "sha256": "d3417b8170eb9ab4083aaf7aaa488d740317ec2bcfa2c74dafd3bc62f9065010"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -112,6 +113,7 @@
     "rtmsg2_contract": "FINAL: chain.rtmsg2() -> {ptr, bytes(Uint8Array 512)}; kernel routingSocketReply uses toBytes(reply)||toBytes(reply.bytes); hybrid is legacy PB_RTMSG2=hybrid",
     "memory_spaces": "process: p.readBytes/read1-8/write1-8; kernel: rw.*, p.pipeReadBytes/p.pipeRead/pipeWrite (proto 0x08/0x09)",
     "regression_guard": "demo-fullchain.py exit!=0 if stages<13/OK<13/DEGRADED/FAIL",
-    "debug": "PB_DEBUG=1 prints rtmsg2 type/len/first8/ret@184"
+    "debug": "PB_DEBUG=1 prints rtmsg2 type/len/first8/ret@184",
+    "pipe_read_bytes": "p.pipeReadBytes(addr,len) — bulk kernel read via pipe, 1 round-trip; used by crossPipes"
   }
 }

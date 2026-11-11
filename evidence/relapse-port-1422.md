@@ -742,3 +742,27 @@ else replyBytes = await readProcessBytes(reply, ...)   // сюда падал {p
 
 Согласованный контракт reply: `{ ptr, bytes }`, где `bytes` — `Uint8Array(512)` (Array тоже принимается),
 `ptr` — адрес в памяти процесса; hybrid (Uint8Array с полями `.ptr/.bytes`) поддержан как совместимость.
+
+
+---
+
+## 17. Контракт reply закрыт (финальная сверка с recon-lua-vector)
+
+Мост переведён на **дефолтный чистый `{ptr, bytes}`**; hybrid оставлен как совместимость.
+Сверка после фикса §16.5:
+
+| проверка | результат |
+|---|---|
+| `demo-fullchain.py` на дефолте `object` | **13 стадий, OK=13, DEGRADED=0, FAIL=0**, EXIT=0 |
+| `demo-fullchain.py` в режиме hybrid (legacy) | 13 / OK=13 / DEGRADED=0, EXIT=0 |
+| мой `--dry-run-objreply` (чистый `{ptr,bytes}`) | 13 / OK=13 / DEGRADED=0 |
+| `--dry-run-full` (reply = Uint8Array) | 13 / OK=13 / DEGRADED=0 |
+| `--dry-run` | 13 / OK=12 / DEGRADED=1 |
+| `--dry-run-no-oid` | 13 / OK=11 / DEGRADED=2 |
+| `--dry-run-kaslr-fail` | FAIL на стадии 4 (self-DoS guard) — ожидаемо |
+| `selftest.sh` | **EXIT=0**, тестов=19, PASS=17, FAIL=0, SKIP=2 |
+
+Согласованный контракт: `chain.rtmsg2() -> { ptr, bytes }`, где `bytes` — `Uint8Array(512)`
+(обычный `Array` тоже принимается), `ptr` — адрес в памяти процесса; hybrid — только совместимость.
+Регрессионный контроль дублирован с обеих сторон: у них `demo-fullchain.py` (exit≠0 при
+стадий<13/OK<13/DEGRADED>0/FAIL>0), у нас `--dry-run-objreply`; их `run.sh` включает наш режим шагом 8.

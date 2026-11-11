@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 
-import { openSyncPrimitive, AsyncClient, makeChain, makeRw, attachPipes } from './pb-tcp.mjs';
+import { openSyncPrimitive, AsyncClient, makeChain, makeRw, attachPipes, pipeStats } from './pb-tcp.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JB1422 = path.resolve(HERE, '../../jb1422');
@@ -108,6 +108,11 @@ for (const st of stages) {
               `${String(st.status).padEnd(8)} | ${(st.detail || '').slice(0, 60)}`);
 }
 const count = (status) => stages.filter((s) => s.status === status).length;
+if (process.env.PB_DEBUG) {
+  console.error('[bulk] pipeReadBytes: ' + pipeStats.pipeReadBytesCalls + ' calls / ' +
+                pipeStats.pipeReadBytesBytes + ' bytes; pipeRead: ' + pipeStats.pipeReadCalls +
+                '; pipeWrite: ' + pipeStats.pipeWriteCalls);
+}
 console.log(`\nИТОГ: done=${result.done}, стадий=${stages.length}, OK=${count('OK')}, ` +
             `DEGRADED=${count('DEGRADED')}, FAIL=${count('FAIL')}`);
 process.exitCode = result.done ? 0 : 1;

@@ -167,3 +167,10 @@ Kernel принимает его в `routingSocketReply()`:
 Отладка: `PB_DEBUG=1` печатает режим, тип, длину, первые 8 байт и `ret@184`.
 Регрессия: `demo-fullchain.py` возвращает !=0, если стадий < 13, OK < 13, есть DEGRADED/FAIL или
 `done != true` (переопределяется `EXPECTED_STAGES`).
+
+### pipeReadBytes — уже реализовано (bulk-чтение ядра через pipe)
+
+Мост отдаёт `p.pipeReadBytes(addr, len) -> Uint8Array` (kernel-space, команда протокола 0x08) —
+crossPipes использует его автоматически, когда он есть. Факт из прогона (`PB_DEBUG=1`):
+`[bulk] pipeReadBytes: 94 calls / 66254 bytes; pipeRead: 0; pipeWrite: 46` — то есть stage 8 и
+последующие чтения ядра идут 1 round-trip на вызов, побайтовый `pipeRead` не задействован.
