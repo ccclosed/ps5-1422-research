@@ -312,4 +312,4 @@ canvas-leak мёртв (`zero-at-free`, p691 вернул нули), а YARPE с
 **4.03–12.02**; форки/автолоадеры заявляют «up to 13.60». Для 14.22 публичных подтверждений нет;
 `sc.version` покажет фактическую прошивку — это и есть первый проверочный сигнал на консоли.
 
-**Full-chain через YARPE-примитив (TCP, `demo-fullchain.py`):** стадий=12, OK=10, DEGRADED=2, FAIL=0 (done=true). Лог: `tools/lua-lab/bundle-1422/output/fullchain-over-tcp.log`.
+**Full-chain через YARPE-примитив (TCP, `demo-fullchain.py`):** стадий=13, OK=13, DEGRADED=0, FAIL=0 (done=true); для этого добавлены префетч-кэш чтения (иначе сканер стадии 5 упирался в бюджет), `p.pipeRead/p.pipeWrite` (стадия 8) и `options.triggerPayload` = `t1_aio_wait_race.elf` (стадия 13). Лог: `tools/lua-lab/bundle-1422/output/fullchain-over-tcp.log`.

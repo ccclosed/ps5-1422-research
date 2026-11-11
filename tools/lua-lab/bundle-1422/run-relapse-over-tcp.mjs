@@ -56,6 +56,22 @@ for (const candidate of candidates) {
   } catch { /* пробуем следующий */ }
 }
 
+// stage 13: триггер t1_aio_wait_race.elf (кладём в options.triggerPayload)
+let triggerPayload = null;
+let triggerName = 't1_aio_wait_race.elf';
+const triggerCandidates = [
+  path.resolve(HERE, '../../jb1422/payloads/triggers/t1_aio_wait_race.elf'),
+  path.resolve(HERE, '../../kexpl/t1_aio_wait_race.elf'),
+  path.resolve(process.cwd(), 'tools/jb1422/payloads/triggers/t1_aio_wait_race.elf'),
+];
+for (const candidate of triggerCandidates) {
+  try {
+    triggerPayload = new Uint8Array(await readFile(candidate));
+    triggerName = path.basename(candidate);
+    break;
+  } catch { /* пробуем следующий */ }
+}
+
 const p = openSyncPrimitive(host, port);
 const client = await new AsyncClient(host, port).connect();
 const chain = makeChain(client, p);
@@ -73,7 +89,8 @@ try {
     p,
     chain,
     (text) => lines.push(text),
-    { attachKernelRw: () => rw, payload, elfldrNoWait: true },
+    { attachKernelRw: () => rw, payload, elfldrNoWait: true,
+      triggerPayload, triggerName },
   );
 } finally {
   p.close();

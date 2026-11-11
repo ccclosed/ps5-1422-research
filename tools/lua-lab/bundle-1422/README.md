@@ -121,8 +121,11 @@ dry-run-моках) слушает TCP; `run-relapse-over-tcp.mjs` импорт�
 Результат (реальный прогон, лог `output/fullchain-over-tcp.log`):
 
 ```
-ИТОГ: done=true, стадий=12, OK=10, DEGRADED=2, FAIL=0
+ИТОГ: done=true, стадий=13, OK=13, DEGRADED=0, FAIL=0
 ```
 
-DEGRADED: стадия 5 (поиск syscall-стабов в синтетическом «ядре») и стадия 8 (cross-pipes —
-так же DEGRADED и в штатном dry-run). Payload 394 568 Б простеган через TCP (write1-батчинг).
+Все 13 стадий зелёные — как `--dry-run-full` у владельца kernel-модуля. Что для этого понадобилось:
+префетч-кэш чтения (сканеры цепочки читают байты по одному; без кэша стадия 5 упиралась в бюджет),
+`p.pipeRead/p.pipeWrite` для cross-pipes (стадия 8) и `options.triggerPayload` с
+`t1_aio_wait_race.elf` для AIO sanity check (стадия 13). Payload 394 568 Б и триггер 10 000 Б
+простеганы через TCP (write1-батчинг по 32 KiB).

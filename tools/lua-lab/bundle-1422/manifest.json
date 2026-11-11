@@ -22,7 +22,7 @@
     "sender_selftest": "PASS (8-byte LE framing)",
     "agent_lua_lua51_compile": "PASS",
     "run_sh": "7/7 PASS",
-    "fullchain_over_tcp": "PASS: 12 stages, done=true, OK=10, DEGRADED=2, FAIL=0 (log: output/fullchain-over-tcp.log)"
+    "fullchain_over_tcp": "PASS: 13 stages, done=true, OK=13, DEGRADED=0, FAIL=0 (log: output/fullchain-over-tcp.log)"
   },
   "not_verified_on_pc": [
     "execution on console 14.22",
@@ -78,20 +78,20 @@
       "sha256": "38a83b95b93159f710581504c3039665c3789b39508ea37ee3e9bb174aade3c8"
     },
     "README.md": {
-      "bytes": 7338,
-      "sha256": "dcb68ea43463ed95479720042e71d0c1188f4ed82d99e3c7a78148e027941620"
+      "bytes": 9023,
+      "sha256": "bef471f08d7b9ad3cca97acb42a5948f9fe318f6f8b11841105ecd253345ac8a"
     },
     "demo-fullchain.py": {
       "bytes": 3726,
       "sha256": "d2e6936e49bbb50eec349bf8674de25b07b58d06f4cae07a43705e3f74203a66"
     },
     "run-relapse-over-tcp.mjs": {
-      "bytes": 3992,
-      "sha256": "9f63fb96bbe221441549672c28f49d02670d1695e99ce89fb4d3159db467b4d9"
+      "bytes": 4764,
+      "sha256": "b9e5df26638c8dccbfb389fb737bb56bac7d6037740fb04c45944cbae4d47a83"
     },
     "pb-tcp.mjs": {
-      "bytes": 9901,
-      "sha256": "02361cf723bdf3e7ac27b6136c329aafcf025f85f994f8369dbbbe55e6faf19d"
+      "bytes": 11505,
+      "sha256": "9fc2a80ee8044b3e5f603bfcfcd512ab86eeb3494234f58ca0f8c8052327c603"
     },
     "pb-worker.mjs": {
       "bytes": 4564,
@@ -103,6 +103,9 @@
     "hook": "separate runner run-relapse-over-tcp.mjs — kernel/** не изменялся",
     "sync_p": "worker_threads + SharedArrayBuffer + Atomics (p.read*/write*/malloc синхронны)",
     "async": "chain.syscall / rw.read / rw.write — отдельный TCP-сокет",
-    "write_batching": "последовательные write1 батчатся по 32 KiB (staging ELF 394568 Б)"
+    "write_batching": "последовательные write1 батчатся по 32 KiB (staging ELF 394568 Б)",
+    "stage8_pipes": "p.pipeRead/p.pipeWrite (attachPipes) — cross-pipes OK",
+    "stage13_trigger": "options.triggerPayload = t1_aio_wait_race.elf (10000 B)",
+    "read_cache": "prefetch 4 KiB + invalidate on write (byte scanners speed-up)"
   }
 }
